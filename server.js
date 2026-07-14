@@ -2,13 +2,13 @@ import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 // import Redis from 'ioredis'; // علقناها لأننا لم نستخدمها
-// import axios from 'axios'; // علقناها مؤقتاً
+import axios from 'axios'; // علقناها مؤقتاً
 
 const app = express();
 
 // routes
 app.get("/", (req, res) => {
-    res.send("✅ GellySocial Socket Server يعمل بنجاح!");
+    res.send("✅ GellySocial Socket Server tamam يعمل بنجاح!");
 });
 
 app.get("/health", (req, res) => {
@@ -23,7 +23,7 @@ const server = createServer(app);
 const io = new Server(server, {
     cors: {
         origin: process.env.NODE_ENV === 'production' 
-            ? ['https://gellysocial.vercel.app', 'https://yourdomain.com'] // ضع روابط موقعك هنا
+            ? ['https://gellysocial.vercel.app', 'http://192.168.1.7:8000',"*"] // ضع روابط موقعك هنا
             : '*',
         transports: ['websocket', 'polling']
     },
@@ -367,9 +367,9 @@ setInterval(async () => {
         if (lastAct > lastUpdate || (now - lastUpdate) >= LAST_SEEN_UPDATE_INTERVAL) {
             try {
                 // يمكن تفعيل هذا الجزء عند الحاجة
-                // await axios.post('http://localhost:8000/api/last-seen', {}, {
-                //     headers: { Authorization: 'Bearer ' + token }
-                // });
+                 await axios.post('http://localhost:8000/api/last-seen', {}, {
+                     headers: { Authorization: 'Bearer ' + token }
+                 });
                 lastApiUpdate.set(userId, now);
             } catch (err) {
                 const status = err.response?.status;
