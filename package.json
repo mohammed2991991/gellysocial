@@ -1,0 +1,19 @@
+{
+  "name": "gellysocial",
+  "version": "1.0.0",
+  "description": "",
+  "main": "server.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server"
+  },
+  "author": "Mohammed",
+  "license": "ISC",
+  "dependencies": {
+	"express": "^5.2.1",
+	   "ioredis": "^5.8.2",
+	   "laravel-echo": "^2.2.7",
+	   "socket.io": "^4.8.3",
+	   "socket.io-client": "^4.8.3"
+  }
+}
