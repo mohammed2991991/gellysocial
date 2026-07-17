@@ -5,6 +5,9 @@ import Redis from 'ioredis';
 import axios from 'axios';
 
 const app = express();
+app.get("/", (req, res) => {
+    res.send("GellySocial Socket Server tamam يعمل بنجاح!");
+});
 const server = createServer(app);
 const io = new Server(server, { 
 	cors: { 
@@ -353,6 +356,9 @@ gellybookns.on('connection', socket => {
 
 });
 
-server.listen(3000, () =>
-    console.log('Socket.IO running on 3000')
-);
+const port = process.env.PORT || 8080;
+server.listen(port, () => {
+    console.log(`🚀 خادم GellySocial Socket.IO يعمل على المنفذ ${port}`);
+    console.log(`📊 المسار: /gellybook/`);
+    console.log(`🌐 الحالة: http://localhost:${port}/health`);
+});
