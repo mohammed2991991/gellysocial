@@ -5,17 +5,12 @@ import Redis from 'ioredis';
 import axios from 'axios';
 
 const app = express();
-app.get("/", (req, res) => {
-    res.send("GellySocial Socket Server tamam يعمل بنجاح!");
-});
 const server = createServer(app);
 const io = new Server(server, { 
-	 cors: {
-        origin: process.env.NODE_ENV === 'production' 
-            ? ['https://gellysocial.vercel.app', 'http://192.168.1.7:8000',"*"] // ضع روابط موقعك هنا
-            : '*',
-        transports: ['websocket', 'polling']
-    },	
+	cors: { 
+		origin: '*',	
+		transports: ['websocket', 'polling']  
+	},	
 	path: "/gellybook/",
 	pingInterval: 5000,
 	pingTimeout: 10000
@@ -357,10 +352,8 @@ gellybookns.on('connection', socket => {
 */
 
 });
-
 const port = process.env.PORT || 8080;
-server.listen(port, () => {
-    console.log(`🚀 خادم GellySocial Socket.IO يعمل على المنفذ ${port}`);
-    console.log(`📊 المسار: /gellybook/`);
-    console.log(`🌐 الحالة: http://localhost:${port}/health`);
-});
+
+server.listen(port, () =>
+    console.log('Socket.IO running on '+port)
+);
