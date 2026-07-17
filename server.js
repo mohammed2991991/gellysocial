@@ -10,10 +10,12 @@ app.get("/", (req, res) => {
 });
 const server = createServer(app);
 const io = new Server(server, { 
-	cors: { 
-		origin: '*',	
-		transports: ['websocket', 'polling']  
-	},	
+	 cors: {
+        origin: process.env.NODE_ENV === 'production' 
+            ? ['https://gellysocial.vercel.app', 'http://192.168.1.7:8000',"*"] // ضع روابط موقعك هنا
+            : '*',
+        transports: ['websocket', 'polling']
+    },	
 	path: "/gellybook/",
 	pingInterval: 5000,
 	pingTimeout: 10000
