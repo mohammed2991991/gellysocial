@@ -1,16 +1,23 @@
 import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
-import Redis from 'ioredis';
+//m5m
+//import Redis from 'ioredis';
 import axios from 'axios';
 
 const app = express();
+app.get("/", (req, res) => {
+    res.send(" Working successfully..");
+});
+
 const server = createServer(app);
 const io = new Server(server, { 
-	cors: { 
-		origin: '*',	
-		transports: ['websocket', 'polling']  
-	},	
+	cors: {
+	    origin: process.env.NODE_ENV === 'production' 
+	        ? ['https://gellysocial.vercel.app', 'http://192.168.1.7:8000',"*"] // ضع روابط موقعك هنا
+	        : '*',
+	    transports: ['websocket', 'polling']
+	},
 	path: "/gellybook/",
 	pingInterval: 5000,
 	pingTimeout: 10000
@@ -34,11 +41,13 @@ const lastApiUpdate = new Map();      // userId -> last time we called /api/last
 const ONLINE_BROADCAST_INTERVAL = 15000;
 const LAST_SEEN_UPDATE_INTERVAL = 60000; 
 
-const redis = new Redis();
 let openChats = {};
-redis.psubscribe('*');
 
 const gellybookns = io.of("/gellybook");
+
+/*
+const redis = new Redis();
+redis.psubscribe('*');
 
 redis.on('pmessage', (pattern, channel, message) => {
     const payload = JSON.parse(message);
@@ -73,7 +82,7 @@ redis.on('pmessage', (pattern, channel, message) => {
         gellybookns.to(receiverRoom).emit(event, payload.data);
     }
 });
-
+*/
 // دالة بث المستخدمين المتصلين
 function broadcastOnlineUsers() {
     const onlineList = Array.from(onlineUsers.keys());
@@ -307,7 +316,38 @@ gellybookns.on('connection', socket => {
 
 	    broadcastOnlineUsers();
 	});
+	app.post('/webhook', express.json(), (req, res) => {
+	    const { event, data } = req.body;
+	    
+	    if (!event || !data) {
+	        return res.status(400).send('Missing event or data');
+	    }
 
+	    // هنا نفس المنطق اللي كان داخل redis.on('pmessage')
+	    if (event === 'message.sent' || event === 'message.deleted') {
+	        const senderRoom = 'chat.' + data.sender_id;
+	        const receiverRoom = 'chat.' + data.receiver_id;
+	        gellybookns.to(senderRoom).emit(event, data);
+	        gellybookns.to(receiverRoom).emit(event, data);
+	    } 
+	    else if (event === 'message.seen' || event === 'message.delivered') {
+	        // ... نفس الكود القديم
+	    } 
+	    else if (event === 'message.sent.group' || event === 'message.deleted.group') {
+	        gellybookns.to('group.' + data.group_id).emit(event, data);
+	    } 
+	    else if (event === 'post.newpost') {
+	        gellybookns.to('newpost.' + data.receiver_id).emit(event, data);
+	    } 
+	    else if (event === 'message.friendrequestsent') {
+	        gellybookns.to('friendrequestsent.' + data.receiver_id).emit(event, data);
+	    } 
+	    else if (event === 'message.friendrequestcanceled') {
+	        gellybookns.to('friendrequestcanceled.' + data.receiver_id).emit(event, data);
+	    }
+
+	    res.status(200).send('Event processed');
+	});
 	socket.on('disconnect', () => {
 	    const userId = socket.userId;
 	    if (!userId) return;
@@ -355,5 +395,5 @@ gellybookns.on('connection', socket => {
 const port = process.env.PORT || 8080;
 
 server.listen(port, () =>
-    console.log('Socket.IO running on '+port)
+    console.log('Socket.IO running on port :  '+port + " success ")
 );
