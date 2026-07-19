@@ -6,8 +6,10 @@ import { Server } from 'socket.io';
 import axios from 'axios';
 
 const app = express();
+const port = process.env.PORT || 8080;
+
 app.get("/", (req, res) => {
-    res.send(" Working successfully..");
+    res.send(" Working successfully : "+ port );
 });
 
 const server = createServer(app);
@@ -392,7 +394,6 @@ gellybookns.on('connection', socket => {
 */
 
 });
-const port = process.env.PORT || 8080;
 
 server.listen(port, () =>
     console.log('Socket.IO running on port :  '+port + " success ")
