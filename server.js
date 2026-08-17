@@ -342,11 +342,23 @@ gellybookns.on('connection', socket => {
 	        gellybookns.to('newpost.' + data.receiver_id).emit(event, data);
 	    } 
 	    else if (event === 'message.friendrequestsent') {
+                             console.log("Sed");
+	
 	        gellybookns.to('friendrequestsent.' + data.receiver_id).emit(event, data);
 	    } 
 	    else if (event === 'message.friendrequestcanceled') {
+                             console.log("Canceld");
 	        gellybookns.to('friendrequestcanceled.' + data.receiver_id).emit(event, data);
 	    }
+             else if (event === 'follow.page') {
+        console.log('page.' + data.receiver_id);
+        gellybookns.to('page.' + data.receiver_id).emit(event, data);
+    } 
+    else if (event === 'follow.group') {
+        console.log('group.' + data.receiver_id);
+        gellybookns.to('group.' + data.receiver_id).emit(event, data);
+    } 
+            
 
 	    res.status(200).send('Event processed');
 	});
