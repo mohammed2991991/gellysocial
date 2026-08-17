@@ -24,16 +24,18 @@ const io = new Server(server, {
 	pingInterval: 5000,
 	pingTimeout: 10000
 });
+
 function setOnline(userId, socketId) {
     if (!onlineUsers.has(userId)) {
         onlineUsers.set(userId, new Set());
     }
-
     onlineUsers.get(userId).add(socketId);
 }
+
 function touch(userId) {
     lastActivity.set(userId, Date.now());
 }
+
 const lastSeen = new Map();
 const onlineUsers = new Map();        // userId -> Set of socket.id
 const lastActivity = new Map();       // userId -> last activity timestamp
@@ -85,11 +87,16 @@ redis.on('pmessage', (pattern, channel, message) => {
     }
 });
 */
+
 // دالة بث المستخدمين المتصلين
 function broadcastOnlineUsers() {
     const onlineList = Array.from(onlineUsers.keys());
     gellybookns.emit('friends.online.list', { users: onlineList });
 }
+
+// ====================================================
+// التعديل الأساسي: استخدم now بدلاً من lastAct عند انتهاء المهلة
+// ====================================================
 setInterval(async () => {
     const now = Date.now();
     const OFFLINE_TIMEOUT = 30000; // 30 ثانية
@@ -101,174 +108,143 @@ setInterval(async () => {
         // فحص المستخدمين المتصلين الذين تجاوزوا المهلة
         if (isOnline && timeSinceLastActivity > OFFLINE_TIMEOUT) {
             onlineUsers.delete(userId);
-            lastSeen.set(userId, lastAct);
+            // ✅ استخدم now بدلاً من lastAct (الوقت الحالي للانقطاع)
+            lastSeen.set(userId, now);
             userTokens.delete(userId);
-            gellybookns.emit('user.offline', { userId, lastSeen: lastAct });
-            broadcastOnlineUsers();
+            gellybookns.emit('user.offline', { userId, lastSeen: now });
+            // سيتم استدعاء broadcastOnlineUsers() في نهاية الدالة
             continue;
         }
 
-        // للمستخدمين غير المتصلين: تحديث lastSeen عبر API (كما هو موجود)
+        // للمستخدمين غير المتصلين: تحديث lastSeen عبر API (إذا أردت تفعيله)
         if (!isOnline) {
             const lastUpdate = lastApiUpdate.get(userId) || 0;
             const token = userTokens.get(userId);
-            // ... باقي الكود الأصلي ...
+            // هذا الجزء معلق حالياً، يمكنك تفعيله عند الحاجة
+            /*
+            if (!token) {
+                userTokens.delete(userId);
+                continue;
+            }
+            if (lastAct > lastUpdate || (now - lastUpdate) >= LAST_SEEN_UPDATE_INTERVAL) {
+                try {
+                    await axios.post('http://localhost:8000/api/last-seen', {}, {
+                        headers: { Authorization: 'Bearer ' + token }
+                    });
+                    lastApiUpdate.set(userId, now);
+                } catch (err) {
+                    const status = err.response?.status;
+                    console.error(`Failed to update lastSeen for user ${userId}: status=${status}`);
+                    if (status === 401) {
+                        userTokens.delete(userId);
+                        lastActivity.delete(userId);
+                        lastSeen.delete(userId);
+                        onlineUsers.delete(userId);
+                    }
+                }
+            }
+            */
         }
     }
 
     // بث القائمة المحدثة
     broadcastOnlineUsers();
 }, ONLINE_BROADCAST_INTERVAL);
-//
-//setInterval(async () => {
-//    const now = Date.now();
-//    const toDelete = []; // لتجميع userIds التي يجب حذفها
-//
-//    for (const [userId, lastAct] of lastActivity.entries()) {
-//        const lastUpdate = lastApiUpdate.get(userId) || 0;
-//        const token = userTokens.get(userId);
-//		if (!onlineUsers.has(userId)) {
-//		 //   lastSeen.set(userId, lastAct);
-//		}
-//		if (onlineUsers.has(userId)) continue;
-//		gellybookns.emit('user.lastSeen.update', {
-//		    userId,
-//		    lastSeen: lastSeen.get(userId) || lastActivity.get(userId)
-//		});
-//	
-//		if (!token) {
-//		    userTokens.delete(userId);
-//		    continue;
-//		}
-//        if (lastAct > lastUpdate || (now - lastUpdate) >= LAST_SEEN_UPDATE_INTERVAL) {
-//            try {
-//             /*   await axios.post('http://localhost:8000/api/last-seen', {}, {
-//                    headers: { Authorization: 'Bearer ' + token }
-//                });*/
-//                lastApiUpdate.set(userId, now);
-//            } catch (err) {
-//                const status = err.response?.status;
-//                console.error(`Failed to update lastSeen for user ${userId}: status=${status}`);
-//                if (status === 401) {
-//
-//					userTokens.delete(userId);
-//					      lastActivity.delete(userId);
-//						  lastSeen.delete(userId);
-//					      onlineUsers.delete(userId);
-//					}
-//            }
-//        }
-//
-//    }
-//
-//    // حذف المستخدمين الذين فشلوا أو ليس لديهم توكن
-//    for (const userId of toDelete) {
-//        lastActivity.delete(userId);
-//        lastApiUpdate.delete(userId);
-//        console.log(`Cleaned up lastActivity for user ${userId} due to missing/invalid token`);
-//    }
-//
-//    broadcastOnlineUsers();
-//}, ONLINE_BROADCAST_INTERVAL);
 
-
+// ====================================================
+// حدث connection
+// ====================================================
 gellybookns.on('connection', socket => {
     const token = socket.handshake.auth.token;
     const userId = socket.handshake.auth.userId;
-	lastSeen.delete(userId);
+    lastSeen.delete(userId);
 
-	if (userId && token) {
-	     userTokens.set(userId, token);  // ✅ دائماً استبدل التوكن القديم بالجديد
-	     if (!lastActivity.has(userId)) lastActivity.set(userId, Date.now());
-	 }
+    if (userId && token) {
+        userTokens.set(userId, token);
+        if (!lastActivity.has(userId)) lastActivity.set(userId, Date.now());
+    }
     socket.userId = userId;
     socket.token = token;
 
     // تخزين التوكن إذا كان جديداً
-	if (userId && token) {
-	    userTokens.set(userId, token); // دايمًا update
-	}
+    if (userId && token) {
+        userTokens.set(userId, token);
+    }
 
-	
-	// في خادم Socket.IO (gellybookns)
-	socket.on('call.start', ({ toUserId, callerName, callType }) => {
-	    const targetRoom = 'chat.' + toUserId;
-	    socket.to(targetRoom).emit('call.incoming', {
-	        fromUserId: socket.userId,
-	        callerName: callerName,
-	        callType: callType
-	    });
-	});
+    // أحداث المكالمات
+    socket.on('call.start', ({ toUserId, callerName, callType }) => {
+        const targetRoom = 'chat.' + toUserId;
+        socket.to(targetRoom).emit('call.incoming', {
+            fromUserId: socket.userId,
+            callerName: callerName,
+            callType: callType
+        });
+    });
 
-	socket.on('call.accept', ({ toUserId }) => {
-	    const targetRoom = 'chat.' + toUserId;
-	    socket.to(targetRoom).emit('call.answered');
-	});
+    socket.on('call.accept', ({ toUserId }) => {
+        const targetRoom = 'chat.' + toUserId;
+        socket.to(targetRoom).emit('call.answered');
+    });
 
-	socket.on('call.reject', ({ toUserId }) => {
-	    const targetRoom = 'chat.' + toUserId;
-	    socket.to(targetRoom).emit('call.rejected');
-	});
+    socket.on('call.reject', ({ toUserId }) => {
+        const targetRoom = 'chat.' + toUserId;
+        socket.to(targetRoom).emit('call.rejected');
+    });
 
-	socket.on('call-ended', (data) => {
-	    const targetRoom = 'chat.' + data.to;
-	    gellybookns.to(targetRoom).emit('call-ended', data);
-	});
+    socket.on('call-ended', (data) => {
+        const targetRoom = 'chat.' + data.to;
+        gellybookns.to(targetRoom).emit('call-ended', data);
+    });
 
-	// ✅ إضافة حدث المكالمة الفائتة
-	socket.on('call_missed', ({ to, from, chatId }) => {
-	    socket.to('chat.' + to).emit('call_missed', {
-	        from,
-	        chatId
-	    });
-	});
-	
+    socket.on('call_missed', ({ to, from, chatId }) => {
+        socket.to('chat.' + to).emit('call_missed', {
+            from,
+            chatId
+        });
+    });
+
     socket.on('join-profile', userId => {
         socket.join(`profile.${userId}`);
     });
-	socket.on('heartbeat', () => {
-	    const userId = socket.userId;
-	    if (!userId) return;
 
-	    // تحديث آخر نشاط
-	    lastActivity.set(userId, Date.now());
+    socket.on('heartbeat', () => {
+        const userId = socket.userId;
+        if (!userId) return;
 
-	    // التأكد من أن socket.id موجود في المجموعة (في حال فُقد لأي سبب)
-	    if (onlineUsers.has(userId)) {
-			
-	        onlineUsers.get(userId).add(socket.id);
-	    } else {
-	        // حالة نادرة: يعيد إنشاء المجموعة إذا اختفت لأي سبب
-	        onlineUsers.set(userId, new Set([socket.id]));
-	        gellybookns.emit('user.online', { userId });
-	        broadcastOnlineUsers();
-	      //  lastSeen.delete(userId);
-	    }
-		lastActivity.set(userId, Date.now());
-	});
+        // تحديث آخر نشاط
+        lastActivity.set(userId, Date.now());
 
-		socket.on('join', (room) => {
-	    socket.join(room);
-	    const userIdFromRoom = String(room).split('.').pop();
+        // التأكد من أن socket.id موجود في المجموعة
+        if (onlineUsers.has(userId)) {
+            onlineUsers.get(userId).add(socket.id);
+        } else {
+            onlineUsers.set(userId, new Set([socket.id]));
+            gellybookns.emit('user.online', { userId });
+            broadcastOnlineUsers();
+        }
+        lastActivity.set(userId, Date.now());
+    });
 
-	    setOnline(userIdFromRoom, socket.id);  // تضمن وجوده في onlineUsers
+    socket.on('join', (room) => {
+        socket.join(room);
+        const userIdFromRoom = String(room).split('.').pop();
 
-	    if (!openChats[userIdFromRoom]) openChats[userIdFromRoom] = [];
+        setOnline(userIdFromRoom, socket.id);
 
-	    lastActivity.set(userIdFromRoom, Date.now());
+        if (!openChats[userIdFromRoom]) openChats[userIdFromRoom] = [];
 
-	    if (userIdFromRoom && token) {
-	        userTokens.set(userIdFromRoom, token);
-	    }
+        lastActivity.set(userIdFromRoom, Date.now());
 
-	    socket.userId = userIdFromRoom;
+        if (userIdFromRoom && token) {
+            userTokens.set(userIdFromRoom, token);
+        }
 
-	    // لا حاجة broadcastOnlineUsers() هنا لأنها قد تتكرر، لكن يمكن الاحتفاظ بها إذا أردت
-	    broadcastOnlineUsers();
-	});
-  
-	
-	  socket.on("useristyping", ({ sender, receiver }) => {
+        socket.userId = userIdFromRoom;
+
+        broadcastOnlineUsers();
+    });
+
+    socket.on("useristyping", ({ sender, receiver }) => {
         lastActivity.set(socket.userId, Date.now());
         console.log("typing : " + sender + " + " + receiver);
         const senderRoom = 'chat.' + sender;
@@ -277,32 +253,23 @@ gellybookns.on('connection', socket => {
         gellybookns.to(receiverRoom).emit('useristyping', { sender, receiver });
     });
 
-	socket.on('get-last-seen', (userId, callback) => {
-	    const uid = String(userId);
-	    if (onlineUsers.has(uid)) {
-	        return callback({ lastSeen: 'online' });
-	    }
-	   /* const last = lastSeen.get(uid) || lastActivity.get(uid) || null;
-	    callback({ lastSeen: last });*/
-		if (onlineUsers.has(uid)) {
-		    return callback({ lastSeen: 'online' });
-		}
+    socket.on('get-last-seen', (userId, callback) => {
+        const uid = String(userId);
+        if (onlineUsers.has(uid)) {
+            return callback({ lastSeen: 'online' });
+        }
+        const last = lastSeen.get(uid);
+        return callback({
+            lastSeen: last || lastActivity.get(uid) || null
+        });
+    });
 
-		const last = lastSeen.get(uid);
-
-		return callback({
-		    lastSeen: last || lastActivity.get(uid) || null
-		});
-	});
- 
-
-   socket.on('chat.opened', ({ chatWith }) => {
+    socket.on('chat.opened', ({ chatWith }) => {
         const userId = socket.userId;
         if (!openChats[userId]) openChats[userId] = [];
         if (!openChats[userId].includes(chatWith)) {
             openChats[userId].push(chatWith);
         }
-        // باقي منطق chat.opened حسب قاعدة البيانات الخاصة بك
     });
 
     socket.on('chat.closed', ({ chatWith }) => {
@@ -310,130 +277,109 @@ gellybookns.on('connection', socket => {
             openChats[socket.userId] = openChats[socket.userId].filter(id => id !== chatWith);
         }
     });
-	socket.on('user.offline', () => {
-	    if (socket.userId) {
-	        userTokens.delete(socket.userId);
-	        lastActivity.delete(socket.userId);
-	    }
-	});
-	socket.on('member.logout', async () => {
-	    const userId = socket.userId;
-	    if (!userId) return;
 
-	    const logoutTime = Date.now();
+    socket.on('user.offline', () => {
+        if (socket.userId) {
+            userTokens.delete(socket.userId);
+            lastActivity.delete(socket.userId);
+        }
+    });
 
-	    // 👇 اقفل كل sockets لنفس اليوزر
-	    const sockets = onlineUsers.get(userId);
-	    if (sockets) {
-	        sockets.forEach(sid => {
-	            const s = gellybookns.sockets.get(sid);
-	            if (s) s.disconnect(true);
-	        });
-	    }
+    socket.on('member.logout', async () => {
+        const userId = socket.userId;
+        if (!userId) return;
 
-	    // 👇 احذفه من online
-	    onlineUsers.delete(userId);
+        const logoutTime = Date.now();
 
-	    // 👇 حدّث lastSeen
-	    lastSeen.set(userId, logoutTime);
-	    lastActivity.set(userId, logoutTime);
+        const sockets = onlineUsers.get(userId);
+        if (sockets) {
+            sockets.forEach(sid => {
+                const s = gellybookns.sockets.get(sid);
+                if (s) s.disconnect(true);
+            });
+        }
 
-	    // 👇 بلغ الكل
-	    gellybookns.emit('user.offline', {
-	        userId,
-	        lastSeen: logoutTime
-	    });
-
-	    broadcastOnlineUsers();
-	});
-	app.post('/webhook', express.json(), (req, res) => {
-	    const { event, data } = req.body;
-	    
-	    if (!event || !data) {
-	        return res.status(400).send('Missing event or data');
-	    }
-
-	    // هنا نفس المنطق اللي كان داخل redis.on('pmessage')
-	    if (event === 'message.sent' || event === 'message.deleted') {
-	        const senderRoom = 'chat.' + data.sender_id;
-	        const receiverRoom = 'chat.' + data.receiver_id;
-	        gellybookns.to(senderRoom).emit(event, data);
-	        gellybookns.to(receiverRoom).emit(event, data);
-	    } 
-	    else if (event === 'message.seen' || event === 'message.delivered') {
-	        // ... نفس الكود القديم
-	    } 
-	    else if (event === 'message.sent.group' || event === 'message.deleted.group') {
-	        gellybookns.to('group.' + data.group_id).emit(event, data);
-	    } 
-	    else if (event === 'post.newpost') {
-	        gellybookns.to('newpost.' + data.receiver_id).emit(event, data);
-	    } 
-	    else if (event === 'message.friendrequestsent') {
-                             console.log("Sed");
-	
-	        gellybookns.to('friendrequestsent.' + data.receiver_id).emit(event, data);
-	    } 
-	    else if (event === 'message.friendrequestcanceled') {
-                             console.log("Canceld");
-	        gellybookns.to('friendrequestcanceled.' + data.receiver_id).emit(event, data);
-	    }
-             else if (event === 'follow.page') {
-        console.log('page.' + data.receiver_id);
-        gellybookns.to('page.' + data.receiver_id).emit(event, data);
-    } 
-    else if (event === 'follow.group') {
-        console.log('group.' + data.receiver_id);
-        gellybookns.to('group.' + data.receiver_id).emit(event, data);
-    } 
-            
-
-	    res.status(200).send('Event processed');
-	});
-	socket.on('disconnect', () => {
-	    const userId = socket.userId;
-	    if (!userId) return;
-
-	    const sockets = onlineUsers.get(userId);
-	    if (!sockets) return;
-
-	    sockets.delete(socket.id);
-
-	    if (sockets.size === 0) {
-	        onlineUsers.delete(userId);
-
-	        const now = Date.now();
-	        lastSeen.set(userId, now);
-	        lastActivity.set(userId, now);
-
-	        gellybookns.emit('user.offline', {
-	            userId,
-	            lastSeen: now
-	        });
-	    }
-            broadcastOnlineUsers();
-
-	});
-/*socket.on('disconnect', () => {
-    const userId = socket.userId;
-    if (!userId) return;
-
-    const sockets = onlineUsers.get(userId);
-    if (!sockets) return;
-
-    sockets.delete(socket.id);
-
-    if (sockets.size === 0) {
         onlineUsers.delete(userId);
-        const now = Date.now();
-        lastSeen.set(userId, now);
-        lastActivity.set(userId, now);
-        gellybookns.emit('user.offline', { userId, lastSeen: now });
-    }
+        lastSeen.set(userId, logoutTime);
+        lastActivity.set(userId, logoutTime);
 
-    broadcastOnlineUsers();
-});
-*/
+        gellybookns.emit('user.offline', {
+            userId,
+            lastSeen: logoutTime
+        });
+
+        broadcastOnlineUsers();
+    });
+
+    // Webhook endpoint
+    app.post('/webhook', express.json(), (req, res) => {
+        const { event, data } = req.body;
+
+        if (!event || !data) {
+            return res.status(400).send('Missing event or data');
+        }
+
+        if (event === 'message.sent' || event === 'message.deleted') {
+            const senderRoom = 'chat.' + data.sender_id;
+            const receiverRoom = 'chat.' + data.receiver_id;
+            gellybookns.to(senderRoom).emit(event, data);
+            gellybookns.to(receiverRoom).emit(event, data);
+        } 
+        else if (event === 'message.seen' || event === 'message.delivered') {
+            // ... نفس الكود القديم
+        } 
+        else if (event === 'message.sent.group' || event === 'message.deleted.group') {
+            gellybookns.to('group.' + data.group_id).emit(event, data);
+        } 
+        else if (event === 'post.newpost') {
+            gellybookns.to('newpost.' + data.receiver_id).emit(event, data);
+        } 
+        else if (event === 'message.friendrequestsent') {
+            console.log("Sed");
+            gellybookns.to('friendrequestsent.' + data.receiver_id).emit(event, data);
+        } 
+        else if (event === 'message.friendrequestcanceled') {
+            console.log("Canceld");
+            gellybookns.to('friendrequestcanceled.' + data.receiver_id).emit(event, data);
+        }
+        else if (event === 'follow.page') {
+            console.log('page.' + data.receiver_id);
+            gellybookns.to('page.' + data.receiver_id).emit(event, data);
+        } 
+        else if (event === 'follow.group') {
+            console.log('group.' + data.receiver_id);
+            gellybookns.to('group.' + data.receiver_id).emit(event, data);
+        }
+
+        res.status(200).send('Event processed');
+    });
+
+    // ====================================================
+    // حدث disconnect
+    // ====================================================
+    socket.on('disconnect', () => {
+        const userId = socket.userId;
+        if (!userId) return;
+
+        const sockets = onlineUsers.get(userId);
+        if (!sockets) return;
+
+        sockets.delete(socket.id);
+
+        if (sockets.size === 0) {
+            onlineUsers.delete(userId);
+
+            const now = Date.now();
+            lastSeen.set(userId, now);
+            lastActivity.set(userId, now);
+
+            gellybookns.emit('user.offline', {
+                userId,
+                lastSeen: now
+            });
+        }
+        broadcastOnlineUsers();
+    });
 
 });
 
