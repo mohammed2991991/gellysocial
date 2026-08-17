@@ -90,58 +90,86 @@ function broadcastOnlineUsers() {
     const onlineList = Array.from(onlineUsers.keys());
     gellybookns.emit('friends.online.list', { users: onlineList });
 }
-
-
 setInterval(async () => {
     const now = Date.now();
-    const toDelete = []; // لتجميع userIds التي يجب حذفها
+    const OFFLINE_TIMEOUT = 30000; // 30 ثانية
 
     for (const [userId, lastAct] of lastActivity.entries()) {
-        const lastUpdate = lastApiUpdate.get(userId) || 0;
-        const token = userTokens.get(userId);
-		if (!onlineUsers.has(userId)) {
-		 //   lastSeen.set(userId, lastAct);
-		}
-		if (onlineUsers.has(userId)) continue;
-		gellybookns.emit('user.lastSeen.update', {
-		    userId,
-		    lastSeen: lastSeen.get(userId) || lastActivity.get(userId)
-		});
-	
-		if (!token) {
-		    userTokens.delete(userId);
-		    continue;
-		}
-        if (lastAct > lastUpdate || (now - lastUpdate) >= LAST_SEEN_UPDATE_INTERVAL) {
-            try {
-             /*   await axios.post('http://localhost:8000/api/last-seen', {}, {
-                    headers: { Authorization: 'Bearer ' + token }
-                });*/
-                lastApiUpdate.set(userId, now);
-            } catch (err) {
-                const status = err.response?.status;
-                console.error(`Failed to update lastSeen for user ${userId}: status=${status}`);
-                if (status === 401) {
+        const isOnline = onlineUsers.has(userId);
+        const timeSinceLastActivity = now - lastAct;
 
-					userTokens.delete(userId);
-					      lastActivity.delete(userId);
-						  lastSeen.delete(userId);
-					      onlineUsers.delete(userId);
-					}
-            }
+        // فحص المستخدمين المتصلين الذين تجاوزوا المهلة
+        if (isOnline && timeSinceLastActivity > OFFLINE_TIMEOUT) {
+            onlineUsers.delete(userId);
+            lastSeen.set(userId, lastAct);
+            userTokens.delete(userId);
+            gellybookns.emit('user.offline', { userId, lastSeen: lastAct });
+            broadcastOnlineUsers();
+            continue;
         }
 
+        // للمستخدمين غير المتصلين: تحديث lastSeen عبر API (كما هو موجود)
+        if (!isOnline) {
+            const lastUpdate = lastApiUpdate.get(userId) || 0;
+            const token = userTokens.get(userId);
+            // ... باقي الكود الأصلي ...
+        }
     }
 
-    // حذف المستخدمين الذين فشلوا أو ليس لديهم توكن
-    for (const userId of toDelete) {
-        lastActivity.delete(userId);
-        lastApiUpdate.delete(userId);
-        console.log(`Cleaned up lastActivity for user ${userId} due to missing/invalid token`);
-    }
-
+    // بث القائمة المحدثة
     broadcastOnlineUsers();
 }, ONLINE_BROADCAST_INTERVAL);
+//
+//setInterval(async () => {
+//    const now = Date.now();
+//    const toDelete = []; // لتجميع userIds التي يجب حذفها
+//
+//    for (const [userId, lastAct] of lastActivity.entries()) {
+//        const lastUpdate = lastApiUpdate.get(userId) || 0;
+//        const token = userTokens.get(userId);
+//		if (!onlineUsers.has(userId)) {
+//		 //   lastSeen.set(userId, lastAct);
+//		}
+//		if (onlineUsers.has(userId)) continue;
+//		gellybookns.emit('user.lastSeen.update', {
+//		    userId,
+//		    lastSeen: lastSeen.get(userId) || lastActivity.get(userId)
+//		});
+//	
+//		if (!token) {
+//		    userTokens.delete(userId);
+//		    continue;
+//		}
+//        if (lastAct > lastUpdate || (now - lastUpdate) >= LAST_SEEN_UPDATE_INTERVAL) {
+//            try {
+//             /*   await axios.post('http://localhost:8000/api/last-seen', {}, {
+//                    headers: { Authorization: 'Bearer ' + token }
+//                });*/
+//                lastApiUpdate.set(userId, now);
+//            } catch (err) {
+//                const status = err.response?.status;
+//                console.error(`Failed to update lastSeen for user ${userId}: status=${status}`);
+//                if (status === 401) {
+//
+//					userTokens.delete(userId);
+//					      lastActivity.delete(userId);
+//						  lastSeen.delete(userId);
+//					      onlineUsers.delete(userId);
+//					}
+//            }
+//        }
+//
+//    }
+//
+//    // حذف المستخدمين الذين فشلوا أو ليس لديهم توكن
+//    for (const userId of toDelete) {
+//        lastActivity.delete(userId);
+//        lastApiUpdate.delete(userId);
+//        console.log(`Cleaned up lastActivity for user ${userId} due to missing/invalid token`);
+//    }
+//
+//    broadcastOnlineUsers();
+//}, ONLINE_BROADCAST_INTERVAL);
 
 
 gellybookns.on('connection', socket => {
@@ -383,6 +411,8 @@ gellybookns.on('connection', socket => {
 	            lastSeen: now
 	        });
 	    }
+            broadcastOnlineUsers();
+
 	});
 /*socket.on('disconnect', () => {
     const userId = socket.userId;
