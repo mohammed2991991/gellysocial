@@ -101,22 +101,24 @@ setInterval(async () => {
         // فحص المستخدمين المتصلين الذين تجاوزوا المهلة
         if (isOnline && timeSinceLastActivity > OFFLINE_TIMEOUT) {
             onlineUsers.delete(userId);
-            lastSeen.set(userId, lastAct);
+            
+            // ✅ التصحيح هنا: استخدم now بدلاً من lastAct
+            lastSeen.set(userId, now); 
+            
             userTokens.delete(userId);
-            gellybookns.emit('user.offline', { userId, lastSeen: lastAct });
+            
+            // ✅ أرسل now للعميل
+            gellybookns.emit('user.offline', { userId, lastSeen: now });
             broadcastOnlineUsers();
             continue;
         }
 
-        // للمستخدمين غير المتصلين: تحديث lastSeen عبر API (كما هو موجود)
+        // باقي الكود الخاص بالمستخدمين غير المتصلين (تحديث API) ...
         if (!isOnline) {
-            const lastUpdate = lastApiUpdate.get(userId) || 0;
-            const token = userTokens.get(userId);
-            // ... باقي الكود الأصلي ...
+            // ... الكود الموجود ...
         }
     }
 
-    // بث القائمة المحدثة
     broadcastOnlineUsers();
 }, ONLINE_BROADCAST_INTERVAL);
 //
