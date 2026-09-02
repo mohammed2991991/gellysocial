@@ -7,7 +7,12 @@ import axios from 'axios';
 
 const app = express();
 const port = process.env.PORT || 8080;
-
+import { PeerServer } from 'peer';
+const peerServer = PeerServer({
+    port: 9000,
+    path: '/peerjs',
+    allow_discovery: true
+});
 app.get("/", (req, res) => {
     res.send(" Working successfully : "+ port );
 });
