@@ -1,30 +1,52 @@
 import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
-//m5m
-//import Redis from 'ioredis';
 import axios from 'axios';
+import cors from 'cors';
 
 const app = express();
 const port = process.env.PORT || 8080;
 
+// ====== CORS ======
+app.use(cors({
+    origin: ['https://gellysocial.vercel.app', 'http://localhost:8000', 'http://localhost:3000', '*'],
+    methods: ["GET", "POST"],
+    credentials: true
+}));
+app.use(express.json());
+
 app.get("/", (req, res) => {
-    res.send(" Working successfully : "+ port );
+    res.send("Socket.IO Server running on port: " + port);
 });
 
 const server = createServer(app);
-const io = new Server(server, { 
-	cors: {
-	    origin: process.env.NODE_ENV === 'production' 
-	        ? ['https://gellysocial.vercel.app', 'http://192.168.1.7:8000',"*"] // ضع روابط موقعك هنا
-	        : '*',
-	    transports: ['websocket', 'polling']
-	},
-	path: "/gellybook/",
-	pingInterval: 5000,
-	pingTimeout: 10000
+const io = new Server(server, {
+    cors: {
+        origin: process.env.NODE_ENV === 'production' 
+            ? ['https://gellysocial.vercel.app', 'https://gellysocial.vercel.app', '*']
+            : '*',
+        methods: ["GET", "POST"],
+        credentials: true
+    },
+    path: "/gellybook/",
+    pingInterval: 5000,
+    pingTimeout: 10000,
+    transports: ['websocket', 'polling']
 });
 
+// ====== المتغيرات ======
+const lastSeen = new Map();
+const onlineUsers = new Map();
+const lastActivity = new Map();
+const userTokens = new Map();
+const lastApiUpdate = new Map();
+const OFFLINE_TIMEOUT = 30000;
+const ONLINE_BROADCAST_INTERVAL = 15000;
+let openChats = {};
+
+const gellybookns = io.of("/gellybook");
+
+// ====== دوال مساعدة ======
 function setOnline(userId, socketId) {
     if (!onlineUsers.has(userId)) {
         onlineUsers.set(userId, new Set());
@@ -32,131 +54,36 @@ function setOnline(userId, socketId) {
     onlineUsers.get(userId).add(socketId);
 }
 
-function touch(userId) {
-    lastActivity.set(userId, Date.now());
-}
-
-const lastSeen = new Map();
-const onlineUsers = new Map();        // userId -> Set of socket.id
-const lastActivity = new Map();       // userId -> last activity timestamp
-const userTokens = new Map();         // userId -> token (for API calls)
-const lastApiUpdate = new Map();      // userId -> last time we called /api/last-seen
-
-const ONLINE_BROADCAST_INTERVAL = 15000;
-const LAST_SEEN_UPDATE_INTERVAL = 60000; 
-
-let openChats = {};
-
-const gellybookns = io.of("/gellybook");
-
-/*
-const redis = new Redis();
-redis.psubscribe('*');
-
-redis.on('pmessage', (pattern, channel, message) => {
-    const payload = JSON.parse(message);
-    if (!payload?.data) return;
-    const event = payload.event;
-    const data = payload.data;
-    if (event === 'message.sent' || event === 'message.deleted') {
-        const senderRoom = 'chat.' + payload.data.sender_id;
-        const receiverRoom = 'chat.' + payload.data.receiver_id;
-        gellybookns.to(senderRoom).emit(event, payload.data);
-        gellybookns.to(receiverRoom).emit(event, payload.data);
-    } else if (event === 'message.seen' || event === 'message.delivered') {
-        const msg = data.message;
-        const messageId = data.message_id;
-        const status = data.status;
-        if (!msg || !messageId || !status) return;
-        const senderRoom = 'chat.' + msg.member_id;
-        const receiverRoom = 'chat.' + (data.receiver_id || msg.member_id);
-        gellybookns.to(senderRoom).emit(event, data);
-        gellybookns.to(receiverRoom).emit(event, data);
-    } else if (event === 'message.sent.group' || event === 'message.deleted.group') {
-        const groupRoom = 'group.' + payload.data.group_id;
-        gellybookns.to(groupRoom).emit(event, payload.data);
-    } else if (event === 'post.newpost') {
-        const receiverRoom = 'newpost.' + payload.data.receiver_id;
-        gellybookns.to(receiverRoom).emit(event, payload.data);
-    } else if (event === 'message.friendrequestsent') {
-        const receiverRoom = 'friendrequestsent.' + payload.data.receiver_id;
-        gellybookns.to(receiverRoom).emit(event, payload.data);
-    } else if (event === 'message.friendrequestcanceled') {
-        const receiverRoom = 'friendrequestcanceled.' + payload.data.receiver_id;
-        gellybookns.to(receiverRoom).emit(event, payload.data);
-    }
-});
-*/
-
-// دالة بث المستخدمين المتصلين
 function broadcastOnlineUsers() {
     const onlineList = Array.from(onlineUsers.keys());
     gellybookns.emit('friends.online.list', { users: onlineList });
 }
 
-// ====================================================
-// التعديل الأساسي: استخدم now بدلاً من lastAct عند انتهاء المهلة
-// ====================================================
+// ====== تحديث حالة المستخدمين ======
 setInterval(async () => {
     const now = Date.now();
-    const OFFLINE_TIMEOUT = 30000; // 30 ثانية
 
     for (const [userId, lastAct] of lastActivity.entries()) {
         const isOnline = onlineUsers.has(userId);
         const timeSinceLastActivity = now - lastAct;
 
-        // فحص المستخدمين المتصلين الذين تجاوزوا المهلة
         if (isOnline && timeSinceLastActivity > OFFLINE_TIMEOUT) {
             onlineUsers.delete(userId);
-            // ✅ استخدم now بدلاً من lastAct (الوقت الحالي للانقطاع)
             lastSeen.set(userId, now);
             userTokens.delete(userId);
             gellybookns.emit('user.offline', { userId, lastSeen: now });
-            // سيتم استدعاء broadcastOnlineUsers() في نهاية الدالة
-            continue;
-        }
-
-        // للمستخدمين غير المتصلين: تحديث lastSeen عبر API (إذا أردت تفعيله)
-        if (!isOnline) {
-            const lastUpdate = lastApiUpdate.get(userId) || 0;
-            const token = userTokens.get(userId);
-            // هذا الجزء معلق حالياً، يمكنك تفعيله عند الحاجة
-            /*
-            if (!token) {
-                userTokens.delete(userId);
-                continue;
-            }
-            if (lastAct > lastUpdate || (now - lastUpdate) >= LAST_SEEN_UPDATE_INTERVAL) {
-                try {
-                    await axios.post('http://localhost:8000/api/last-seen', {}, {
-                        headers: { Authorization: 'Bearer ' + token }
-                    });
-                    lastApiUpdate.set(userId, now);
-                } catch (err) {
-                    const status = err.response?.status;
-                    console.error(`Failed to update lastSeen for user ${userId}: status=${status}`);
-                    if (status === 401) {
-                        userTokens.delete(userId);
-                        lastActivity.delete(userId);
-                        lastSeen.delete(userId);
-                        onlineUsers.delete(userId);
-                    }
-                }
-            }
-            */
         }
     }
-
-    // بث القائمة المحدثة
     broadcastOnlineUsers();
 }, ONLINE_BROADCAST_INTERVAL);
 
 // ====================================================
-// حدث connection
+// اتصال Socket.IO
 // ====================================================
 gellybookns.on('connection', socket => {
     const token = socket.handshake.auth.token;
     const userId = socket.handshake.auth.userId;
+    
     lastSeen.delete(userId);
 
     if (userId && token) {
@@ -166,41 +93,76 @@ gellybookns.on('connection', socket => {
     socket.userId = userId;
     socket.token = token;
 
-    // تخزين التوكن إذا كان جديداً
-    if (userId && token) {
-        userTokens.set(userId, token);
+    // ====== الانضمام للغرف ======
+    if (userId) {
+        socket.join('chat.' + userId);
+        socket.join('user.' + userId);
+        setOnline(userId, socket.id);
+        gellybookns.emit('user.online', { userId });
+        broadcastOnlineUsers();
     }
 
-    // أحداث المكالمات
-    socket.on('call.start', ({ toUserId, callerName, callType }) => {
-        const targetRoom = 'chat.' + toUserId;
-        socket.to(targetRoom).emit('call.incoming', {
-            fromUserId: socket.userId,
-            callerName: callerName,
-            callType: callType
+    // ====================================================
+    // أحداث WebRTC (المكالمات)
+    // ====================================================
+    
+    // 1. إرسال عرض مكالمة (Offer)
+  // ====== أحداث WebRTC ======
+    socket.on('call.offer', ({ to, offer, type, callerName }) => {
+        console.log(`📞 Call offer from ${userId} to ${to}`);
+        gellybookns.to('chat.' + to).emit('call.offer', {
+            from: userId,
+            offer: offer,
+            type: type,
+            callerName: callerName || 'مستخدم'
+        });
+    });
+
+    socket.on('call.answer', ({ to, answer }) => {
+        console.log(`📞 Call answer from ${userId} to ${to}`);
+        gellybookns.to('chat.' + to).emit('call.answer', {
+            from: userId,
+            answer: answer
+        });
+    });
+
+    socket.on('call.ice', ({ to, candidate }) => {
+        gellybookns.to('chat.' + to).emit('call.ice', {
+            from: userId,
+            candidate: candidate
         });
     });
 
     socket.on('call.accept', ({ toUserId }) => {
-        const targetRoom = 'chat.' + toUserId;
-        socket.to(targetRoom).emit('call.answered');
+        gellybookns.to('chat.' + toUserId).emit('call.answered');
     });
 
     socket.on('call.reject', ({ toUserId }) => {
-        const targetRoom = 'chat.' + toUserId;
-        socket.to(targetRoom).emit('call.rejected');
+        gellybookns.to('chat.' + toUserId).emit('call.rejected');
     });
 
-    socket.on('call-ended', (data) => {
-        const targetRoom = 'chat.' + data.to;
-        gellybookns.to(targetRoom).emit('call-ended', data);
+    socket.on('call-ended', ({ to, from, duration }) => {
+        console.log(`📞 Call ended: ${from} -> ${to}, duration: ${duration}s`);
+        gellybookns.to('chat.' + to).emit('call-ended', { from, duration });
     });
 
     socket.on('call_missed', ({ to, from, chatId }) => {
-        socket.to('chat.' + to).emit('call_missed', {
-            from,
-            chatId
-        });
+        gellybookns.to('chat.' + to).emit('call_missed', { from, chatId });
+    });
+
+    // ====== أحداث الشات ======
+    socket.on('join', (room) => {
+        socket.join(room);
+        console.log(`📌 ${userId} joined room: ${room}`);
+        const userIdFromRoom = String(room).split('.').pop();
+        setOnline(userIdFromRoom, socket.id);
+        if (!openChats[userIdFromRoom]) openChats[userIdFromRoom] = [];
+        lastActivity.set(userIdFromRoom, Date.now());
+        if (userIdFromRoom && token) {
+            userTokens.set(userIdFromRoom, token);
+        }
+        socket.userId = userIdFromRoom;
+        broadcastOnlineUsers();
     });
 
     socket.on('join-profile', userId => {
@@ -208,45 +170,21 @@ gellybookns.on('connection', socket => {
     });
 
     socket.on('heartbeat', () => {
-        const userId = socket.userId;
-        if (!userId) return;
-
-        // تحديث آخر نشاط
-        lastActivity.set(userId, Date.now());
-
-        // التأكد من أن socket.id موجود في المجموعة
-        if (onlineUsers.has(userId)) {
-            onlineUsers.get(userId).add(socket.id);
+        const uid = socket.userId;
+        if (!uid) return;
+        lastActivity.set(uid, Date.now());
+        if (onlineUsers.has(uid)) {
+            onlineUsers.get(uid).add(socket.id);
         } else {
-            onlineUsers.set(userId, new Set([socket.id]));
-            gellybookns.emit('user.online', { userId });
+            onlineUsers.set(uid, new Set([socket.id]));
+            gellybookns.emit('user.online', { userId: uid });
             broadcastOnlineUsers();
         }
-        lastActivity.set(userId, Date.now());
-    });
-
-    socket.on('join', (room) => {
-        socket.join(room);
-        const userIdFromRoom = String(room).split('.').pop();
-
-        setOnline(userIdFromRoom, socket.id);
-
-        if (!openChats[userIdFromRoom]) openChats[userIdFromRoom] = [];
-
-        lastActivity.set(userIdFromRoom, Date.now());
-
-        if (userIdFromRoom && token) {
-            userTokens.set(userIdFromRoom, token);
-        }
-
-        socket.userId = userIdFromRoom;
-
-        broadcastOnlineUsers();
+        lastActivity.set(uid, Date.now());
     });
 
     socket.on("useristyping", ({ sender, receiver }) => {
         lastActivity.set(socket.userId, Date.now());
-        console.log("typing : " + sender + " + " + receiver);
         const senderRoom = 'chat.' + sender;
         const receiverRoom = 'chat.' + receiver;
         gellybookns.to(senderRoom).emit('useristyping', { sender, receiver });
@@ -265,10 +203,10 @@ gellybookns.on('connection', socket => {
     });
 
     socket.on('chat.opened', ({ chatWith }) => {
-        const userId = socket.userId;
-        if (!openChats[userId]) openChats[userId] = [];
-        if (!openChats[userId].includes(chatWith)) {
-            openChats[userId].push(chatWith);
+        const uid = socket.userId;
+        if (!openChats[uid]) openChats[uid] = [];
+        if (!openChats[uid].includes(chatWith)) {
+            openChats[uid].push(chatWith);
         }
     });
 
@@ -286,35 +224,26 @@ gellybookns.on('connection', socket => {
     });
 
     socket.on('member.logout', async () => {
-        const userId = socket.userId;
-        if (!userId) return;
-
+        const uid = socket.userId;
+        if (!uid) return;
         const logoutTime = Date.now();
-
-        const sockets = onlineUsers.get(userId);
+        const sockets = onlineUsers.get(uid);
         if (sockets) {
             sockets.forEach(sid => {
                 const s = gellybookns.sockets.get(sid);
                 if (s) s.disconnect(true);
             });
         }
-
-        onlineUsers.delete(userId);
-        lastSeen.set(userId, logoutTime);
-        lastActivity.set(userId, logoutTime);
-
-        gellybookns.emit('user.offline', {
-            userId,
-            lastSeen: logoutTime
-        });
-
+        onlineUsers.delete(uid);
+        lastSeen.set(uid, logoutTime);
+        lastActivity.set(uid, logoutTime);
+        gellybookns.emit('user.offline', { userId: uid, lastSeen: logoutTime });
         broadcastOnlineUsers();
     });
 
-    // Webhook endpoint
+    // ====== Webhook ======
     app.post('/webhook', express.json(), (req, res) => {
         const { event, data } = req.body;
-
         if (!event || !data) {
             return res.status(400).send('Missing event or data');
         }
@@ -325,9 +254,6 @@ gellybookns.on('connection', socket => {
             gellybookns.to(senderRoom).emit(event, data);
             gellybookns.to(receiverRoom).emit(event, data);
         } 
-        else if (event === 'message.seen' || event === 'message.delivered') {
-            // ... نفس الكود القديم
-        } 
         else if (event === 'message.sent.group' || event === 'message.deleted.group') {
             gellybookns.to('group.' + data.group_id).emit(event, data);
         } 
@@ -335,54 +261,39 @@ gellybookns.on('connection', socket => {
             gellybookns.to('newpost.' + data.receiver_id).emit(event, data);
         } 
         else if (event === 'message.friendrequestsent') {
-            console.log("Sed");
             gellybookns.to('friendrequestsent.' + data.receiver_id).emit(event, data);
         } 
         else if (event === 'message.friendrequestcanceled') {
-            console.log("Canceld");
             gellybookns.to('friendrequestcanceled.' + data.receiver_id).emit(event, data);
         }
         else if (event === 'follow.page') {
-            console.log('page.' + data.receiver_id);
             gellybookns.to('page.' + data.receiver_id).emit(event, data);
         } 
         else if (event === 'follow.group') {
-            console.log('group.' + data.receiver_id);
             gellybookns.to('group.' + data.receiver_id).emit(event, data);
         }
 
         res.status(200).send('Event processed');
     });
 
-    // ====================================================
-    // حدث disconnect
-    // ====================================================
+    // ====== قطع الاتصال ======
     socket.on('disconnect', () => {
-        const userId = socket.userId;
-        if (!userId) return;
-
-        const sockets = onlineUsers.get(userId);
+        const uid = socket.userId;
+        if (!uid) return;
+        const sockets = onlineUsers.get(uid);
         if (!sockets) return;
-
         sockets.delete(socket.id);
-
         if (sockets.size === 0) {
-            onlineUsers.delete(userId);
-
+            onlineUsers.delete(uid);
             const now = Date.now();
-            lastSeen.set(userId, now);
-            lastActivity.set(userId, now);
-
-            gellybookns.emit('user.offline', {
-                userId,
-                lastSeen: now
-            });
+            lastSeen.set(uid, now);
+            lastActivity.set(uid, now);
+            gellybookns.emit('user.offline', { userId: uid, lastSeen: now });
         }
         broadcastOnlineUsers();
     });
-
 });
 
-server.listen(port, () =>
-    console.log('Socket.IO running on port :  '+port + " success ")
-);
+server.listen(port, () => {
+    console.log(`✅ Socket.IO running on port: ${port}`);
+});
