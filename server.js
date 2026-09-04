@@ -250,12 +250,14 @@ gellybookns.on('connection', socket => {
 
         if (event === 'message.sent' || event === 'message.deleted') {
             const senderRoom = 'chat.' + data.sender_id;
-            const receiverRoom = 'chat.' + data.receiver_id;
+            const receivearRoom = 'chat.' + data.receiver_id;
             gellybookns.to(senderRoom).emit(event, data);
-            gellybookns.to(receiverRoom).emit(event, data);
+            gellybookns.to(receivearRoom).emit(event, data);
+            console.log("Message sent or deleted");
         } 
         else if (event === 'message.sent.group' || event === 'message.deleted.group') {
-            gellybookns.to('group.' + data.group_id).emit(event, data);
+            gellybookns.to('groups.' + data.data.group_id).emit(event, data.data);
+            console.log(data.data.group_id);
         } 
         else if (event === 'post.newpost') {
             gellybookns.to('newpost.' + data.receiver_id).emit(event, data);
