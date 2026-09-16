@@ -31,7 +31,7 @@ const io = new Server(server, {
     path: "/gellybook/",
     pingInterval: 5000,
     pingTimeout: 10000,
-    transports: ['websocket', 'polling']
+    transports: ['websocket']
 });
 
 // ====== المتغيرات ======
