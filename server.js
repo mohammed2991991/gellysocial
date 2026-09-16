@@ -271,7 +271,8 @@ gellybookns.on('connection', socket => {
         else if (event === 'follow.page') {
             gellybookns.to('page.' + data.receiver_id).emit(event, data);
         } 
-        else if (event === 'follow.group') {
+        else if (event === 'follow.group') { 
+            console.log("FOllow group : " + data.receiver_id);
             gellybookns.to('group.' + data.receiver_id).emit(event, data);
         }
 
