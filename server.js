@@ -422,7 +422,7 @@ gellybookns.on('connection', (socket) => {
 // Start
 // ═══════════════════════════════════════════════════════════════
 server.listen(port, () => {
-    console.log(`\n✅ Socket.IO running on port: ${port}`);
+    console.log(`\n✅ Socket.IO: ${port}`);
     console.log(`   Path: /gellybook/`);
     console.log(`   Webhook: POST http://localhost:${port}/webhook\n`);
 });
