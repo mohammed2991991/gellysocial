@@ -86,7 +86,7 @@ function safeEmit(room, event, payload) {
 // Health
 // ═══════════════════════════════════════════════════════════════
 app.get('/', (req, res) => {
-    res.send('Socket.IO Server running on port: ' + port);
+    res.send('Socket.IO: ' + port);
 });
 
 app.get('/health', (req, res) => {
