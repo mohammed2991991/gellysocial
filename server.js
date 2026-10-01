@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════
-// Gellybook Socket.IO Server — نسخة كاملة بعد إصلاح آخر ظهور
+// Gellybook Socket.IO Server — نسخة كاملة مُصلَّحة
 // ═══════════════════════════════════════════════════════════════
 import express from 'express';
 import { createServer } from 'http';
@@ -41,14 +41,15 @@ const gellybookns = io.of('/gellybook');
 // ═══════════════════════════════════════════════════════════════
 // State
 // ═══════════════════════════════════════════════════════════════
-const lastSeen = new Map();        // ✅ وقت آخر ظهور حقيقي (disconnect فقط)
+const lastSeen = new Map();        // آخر ظهور حقيقي (disconnect فعلي)
 const onlineUsers = new Map();     // userId → Set<socketId>
-const lastActivity = new Map();    // ✅ داخلي بس (للـ timeout)
+const lastActivity = new Map();    // داخلي للـ timeout
 const userTokens = new Map();
-const lastApiUpdate = new Map();
+const pendingOffline = new Map();  // userId → timeoutId (Grace period)
 
-const OFFLINE_TIMEOUT = 120000;
-const ONLINE_BROADCAST_INTERVAL = 20000;
+const OFFLINE_TIMEOUT = 120000;         // 2 دقيقة idle → offline
+const ONLINE_BROADCAST_INTERVAL = 20000; // كل 20 ثانية بث اللي أونلاين
+const GRACE_PERIOD = 5000;              // ✅ 5 ثواني قبل إعلان الأوفلاين
 
 let openChats = {};
 
@@ -56,10 +57,11 @@ let openChats = {};
 // Helpers
 // ═══════════════════════════════════════════════════════════════
 function setOnline(userId, socketId) {
-    if (!onlineUsers.has(userId)) {
-        onlineUsers.set(userId, new Set());
+    const id = String(userId);
+    if (!onlineUsers.has(id)) {
+        onlineUsers.set(id, new Set());
     }
-    onlineUsers.get(userId).add(socketId);
+    onlineUsers.get(id).add(socketId);
 }
 
 function broadcastOnlineUsers() {
@@ -76,14 +78,46 @@ function safeEmit(room, event, payload) {
     }
 }
 
-// ✅ دالة موحّدة لتسجيل آخر ظهور
+// ✅ تسجيل آخر ظهور
 function markUserOffline(userId, timestamp = Date.now()) {
     if (!userId) return;
-    userId = String(userId);
-    lastSeen.set(userId, timestamp);
-    lastActivity.delete(userId);   // نظّف lastActivity
-    gellybookns.emit('user.offline', { userId, lastSeen: timestamp });
-    console.log(`💤 user ${userId} → offline @ ${new Date(timestamp).toISOString()}`);
+    const id = String(userId);
+    lastSeen.set(id, timestamp);
+    lastActivity.delete(id);
+    gellybookns.emit('user.offline', { userId: id, lastSeen: timestamp });
+    console.log(`💤 user ${id} → offline @ ${new Date(timestamp).toISOString()}`);
+}
+
+// ✅ جدولة إعلان الأوفلاين بعد Grace Period
+function scheduleOffline(userId) {
+    const id = String(userId);
+
+    // لو فيه تايمر قديم — اقفله
+    if (pendingOffline.has(id)) {
+        clearTimeout(pendingOffline.get(id));
+    }
+
+    const timer = setTimeout(() => {
+        pendingOffline.delete(id);
+        // تأكد إن اليوزر فعلاً مش أونلاين دلوقتي
+        if (!onlineUsers.has(id)) {
+            markUserOffline(id, Date.now());
+            broadcastOnlineUsers();
+        }
+    }, GRACE_PERIOD);
+
+    pendingOffline.set(id, timer);
+    console.log(`⏱️ scheduled offline for user ${id} in ${GRACE_PERIOD/1000}s`);
+}
+
+// ✅ إلغاء الأوفلاين المعلّق
+function cancelPendingOffline(userId) {
+    const id = String(userId);
+    if (pendingOffline.has(id)) {
+        clearTimeout(pendingOffline.get(id));
+        pendingOffline.delete(id);
+        console.log(`✋ cancelled pending offline for user ${id}`);
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -163,7 +197,7 @@ app.post('/webhook', (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
-// Periodic cleanup — للـ timeout بس
+// Periodic cleanup — للـ idle timeout
 // ═══════════════════════════════════════════════════════════════
 setInterval(() => {
     const now = Date.now();
@@ -182,6 +216,7 @@ setInterval(() => {
             }
             onlineUsers.delete(userId);
             userTokens.delete(userId);
+            cancelPendingOffline(userId);
             markUserOffline(userId, now);
         }
     }
@@ -201,23 +236,30 @@ gellybookns.on('connection', (socket) => {
 
     console.log(`\n🔌 Connected: user=${userId} socket=${socket.id}`);
 
-    // ✅ امسح lastSeen بس لو ده أول socket للمستخدم
-    if (userId && !onlineUsers.has(String(userId))) {
-        lastSeen.delete(String(userId));
+    // ✅ إلغاء أي أوفلاين معلّق — المستخدم رجع
+    if (userId) {
+        cancelPendingOffline(userId);
+
+        // ✅ امسح lastSeen بس لو ده أول socket (يعني كان offline فعلاً)
+        if (!onlineUsers.has(String(userId))) {
+            lastSeen.delete(String(userId));
+        }
     }
 
     if (userId && token) {
         userTokens.set(userId, token);
-        if (!lastActivity.has(userId))
-            lastActivity.set(userId, Date.now());
+        if (!lastActivity.has(String(userId)))
+            lastActivity.set(String(userId), Date.now());
     }
 
-    // ═══ الانضمام التلقائي ═══
+    // ═══ الانضمام التلقائي + بث فوري ═══
     if (userId) {
         socket.join('chat.' + userId);
         socket.join('user.' + userId);
-        setOnline(String(userId), socket.id);
-        gellybookns.emit('user.online', {userId});
+        setOnline(userId, socket.id);
+
+        // ✅ بث فوري: user.online + friends.online.list
+        gellybookns.emit('user.online', {userId: String(userId)});
         broadcastOnlineUsers();
     }
 
@@ -284,12 +326,14 @@ gellybookns.on('connection', (socket) => {
 
         lastActivity.set(String(uid), Date.now());
 
-        if (onlineUsers.has(String(uid))) {
-            onlineUsers.get(String(uid)).add(socket.id);
-        } else {
-            onlineUsers.set(String(uid), new Set([socket.id]));
-            gellybookns.emit('user.online', {userId: uid});
+        if (!onlineUsers.has(String(uid))) {
+            // المستخدم رجع بعد ما كان offline
+            cancelPendingOffline(uid);
+            setOnline(uid, socket.id);
+            gellybookns.emit('user.online', {userId: String(uid)});
             broadcastOnlineUsers();
+        } else {
+            onlineUsers.get(String(uid)).add(socket.id);
         }
     });
 
@@ -303,21 +347,17 @@ gellybookns.on('connection', (socket) => {
     });
 
     // ═══════════════════════════════════════════════════════════
-    // ✅ get-last-seen — معدّل
+    // get-last-seen
     // ═══════════════════════════════════════════════════════════
     socket.on('get-last-seen', (uid, callback) => {
         const id = String(uid);
 
-        // لو المستخدم online دلوقتي → رجّع online
         if (onlineUsers.has(id)) {
             return callback({ lastSeen: 'online' });
         }
 
-        // ✅ رجّع lastSeen بس — مش lastActivity
         const last = lastSeen.get(id);
-        return callback({
-            lastSeen: last || null,
-        });
+        return callback({ lastSeen: last || null });
     });
 
     // ═══ Chat opened/closed ═══
@@ -337,25 +377,27 @@ gellybookns.on('connection', (socket) => {
     });
 
     // ═══════════════════════════════════════════════════════════
-    // ✅ user.offline — معدّل: بيسجّل lastSeen كمان
+    // ✅ user.offline (من beforeunload) — بيأجل مش بيبعت فوراً
     // ═══════════════════════════════════════════════════════════
     socket.on('user.offline', () => {
         const uid = socket.realUserId;
         if (!uid) return;
 
+        console.log(`📤 user.offline received from user=${uid}`);
         userTokens.delete(uid);
 
-        // ✅ ما نمسحش lastActivity — نحدّث lastSeen بدل كده
-        // (لو لسه فيه sockets تانية للمستخدم، مايتسجّلش آخر ظهور)
         const sockets = onlineUsers.get(String(uid));
+        // لو ده آخر socket → جدول أوفلاين (مش فوري)
         if (!sockets || sockets.size <= 1) {
-            markUserOffline(uid, Date.now());
+            scheduleOffline(uid);
         } else {
+            // فيه sockets تانية → مسح الـ socket ده بس
+            sockets.delete(socket.id);
             lastActivity.delete(String(uid));
         }
     });
 
-    // ═══ Logout ═══
+    // ═══ Logout صريح — إعلان فوري ═══
     socket.on('member.logout', () => {
         const uid = socket.realUserId;
         if (!uid) return;
@@ -371,13 +413,15 @@ gellybookns.on('connection', (socket) => {
         }
 
         onlineUsers.delete(String(uid));
-        markUserOffline(uid, logoutTime);
+        cancelPendingOffline(uid);       // ✅ إلغاء أي تأجيل
+        markUserOffline(uid, logoutTime); // ✅ إعلان فوري
+        broadcastOnlineUsers();
 
         console.log(`🚪 user ${uid} logged out`);
     });
 
     // ═══════════════════════════════════════════════════════════
-    // ✅ disconnect — معدّل
+    // disconnect
     // ═══════════════════════════════════════════════════════════
     socket.on('disconnect', (reason) => {
         const uid = socket.realUserId;
@@ -392,16 +436,13 @@ gellybookns.on('connection', (socket) => {
 
             if (sockets.size === 0) {
                 onlineUsers.delete(String(uid));
-                markUserOffline(uid, Date.now());
+                // ✅ جدولة أوفلاين (مش فوري)
+                scheduleOffline(uid);
             } else {
-                // ✅ لسه فيه sockets تانية — المستخدم لسه online
                 console.log(`ℹ️ user ${uid} still has ${sockets.size} socket(s) → still online`);
             }
         } else {
-            // ✅ لو مفيش sockets map، برضه سجّل آخر ظهور
-            if (!onlineUsers.has(String(uid))) {
-                markUserOffline(uid, Date.now());
-            }
+            scheduleOffline(uid);
         }
 
         broadcastOnlineUsers();
