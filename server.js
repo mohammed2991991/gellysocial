@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════
-// Gellybook Socket.IO Server — نسخة كاملة بعد إصلاح آخر ظهور
+// Gellybook Socket.IO Server — نسخة كاملة بعد إصلاح آخر ظهور + rooms
 // ═══════════════════════════════════════════════════════════════
 import express from 'express';
 import { createServer } from 'http';
@@ -81,9 +81,22 @@ function markUserOffline(userId, timestamp = Date.now()) {
     if (!userId) return;
     userId = String(userId);
     lastSeen.set(userId, timestamp);
-    lastActivity.delete(userId);   // نظّف lastActivity
+    lastActivity.delete(userId);
     gellybookns.emit('user.offline', { userId, lastSeen: timestamp });
     console.log(`💤 user ${userId} → offline @ ${new Date(timestamp).toISOString()}`);
+}
+
+// ✅ قائمة الرومات اللي المستخدم لازم ينضم لها عشان يستقبل الإشعارات
+function getNotificationRooms(userId) {
+    return [
+        'chat.' + userId,
+        'user.' + userId,
+        'newpost.' + userId,
+        'group.' + userId,
+        'page.' + userId,
+        'friendrequestsent.' + userId,
+        'friendrequestcanceled.' + userId,
+    ];
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -150,18 +163,15 @@ app.post('/webhook', (req, res) => {
             case 'follow.group':
                 safeEmit('group.' + data.receiver_id, event, data);
                 break;
-				
-				case 'message.seen':
-				    // ✅ اللي بعت الرسالة الأصلية (User A) — لازم يعرف إن رسالته اتشاف
-				    if (data.sender_id) {
-				        safeEmit('chat.' + data.sender_id,event, data);
-				    }
-				    // ✅ اللي شاف (User B) — عشان لو عنده أكثر من تاب
-				    if (data.viewer_id && String(data.viewer_id) !== String(data.sender_id)) {
-				        safeEmit('chat.' + data.viewer_id, event, data);
-				    }
-					break;
 
+            case 'message.seen':
+                if (data.sender_id) {
+                    safeEmit('chat.' + data.sender_id, event, data);
+                }
+                if (data.viewer_id && String(data.viewer_id) !== String(data.sender_id)) {
+                    safeEmit('chat.' + data.viewer_id, event, data);
+                }
+                break;
 
             default:
                 console.warn(`⚠️ Unknown event: ${event}`);
@@ -224,13 +234,17 @@ gellybookns.on('connection', (socket) => {
             lastActivity.set(userId, Date.now());
     }
 
-    // ═══ الانضمام التلقائي ═══
+    // ═══════════════════════════════════════════════════════════
+    // ✅ الانضمام التلقائي — كل رومات الإشعارات
+    // ═══════════════════════════════════════════════════════════
     if (userId) {
-        socket.join('chat.' + userId);
-        socket.join('user.' + userId);
+        getNotificationRooms(userId).forEach(room => socket.join(room));
+
         setOnline(String(userId), socket.id);
         gellybookns.emit('user.online', {userId});
         broadcastOnlineUsers();
+
+        console.log(`📥 user ${userId} joined rooms:`, getNotificationRooms(userId).join(', '));
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -315,17 +329,15 @@ gellybookns.on('connection', (socket) => {
     });
 
     // ═══════════════════════════════════════════════════════════
-    // ✅ get-last-seen — معدّل
+    // ✅ get-last-seen
     // ═══════════════════════════════════════════════════════════
     socket.on('get-last-seen', (uid, callback) => {
         const id = String(uid);
 
-        // لو المستخدم online دلوقتي → رجّع online
         if (onlineUsers.has(id)) {
             return callback({ lastSeen: 'online' });
         }
 
-        // ✅ رجّع lastSeen بس — مش lastActivity
         const last = lastSeen.get(id);
         return callback({
             lastSeen: last || null,
@@ -349,7 +361,7 @@ gellybookns.on('connection', (socket) => {
     });
 
     // ═══════════════════════════════════════════════════════════
-    // ✅ user.offline — معدّل: بيسجّل lastSeen كمان
+    // ✅ user.offline
     // ═══════════════════════════════════════════════════════════
     socket.on('user.offline', () => {
         const uid = socket.realUserId;
@@ -357,8 +369,6 @@ gellybookns.on('connection', (socket) => {
 
         userTokens.delete(uid);
 
-        // ✅ ما نمسحش lastActivity — نحدّث lastSeen بدل كده
-        // (لو لسه فيه sockets تانية للمستخدم، مايتسجّلش آخر ظهور)
         const sockets = onlineUsers.get(String(uid));
         if (!sockets || sockets.size <= 1) {
             markUserOffline(uid, Date.now());
@@ -389,7 +399,7 @@ gellybookns.on('connection', (socket) => {
     });
 
     // ═══════════════════════════════════════════════════════════
-    // ✅ disconnect — معدّل
+    // ✅ disconnect
     // ═══════════════════════════════════════════════════════════
     socket.on('disconnect', (reason) => {
         const uid = socket.realUserId;
@@ -406,11 +416,9 @@ gellybookns.on('connection', (socket) => {
                 onlineUsers.delete(String(uid));
                 markUserOffline(uid, Date.now());
             } else {
-                // ✅ لسه فيه sockets تانية — المستخدم لسه online
                 console.log(`ℹ️ user ${uid} still has ${sockets.size} socket(s) → still online`);
             }
         } else {
-            // ✅ لو مفيش sockets map، برضه سجّل آخر ظهور
             if (!onlineUsers.has(String(uid))) {
                 markUserOffline(uid, Date.now());
             }
