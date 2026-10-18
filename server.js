@@ -1,10 +1,10 @@
 // ═══════════════════════════════════════════════════════════════
 // Gellybook Socket.IO Server — نسخة كاملة بعد إصلاح آخر ظهور + rooms
+// + إصلاح باج number/string + ICE restart + memory leaks
 // ═══════════════════════════════════════════════════════════════
 import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
-import axios from 'axios';
 import cors from 'cors';
 
 const app = express();
@@ -12,21 +12,21 @@ const port = process.env.PORT || 8080;
 
 app.use(cors({
     origin: process.env.NODE_ENV === 'production'
-            ? ['https://gellysocial.vercel.app', '*']
-            : '*',
+        ? ['https://gellysocial.vercel.app', '*']
+        : '*',
     methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
     credentials: true,
 }));
-app.use(express.json({limit: '1mb'}));
-app.use(express.urlencoded({extended: true}));
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true }));
 
 const server = createServer(app);
 
 const io = new Server(server, {
     cors: {
         origin: process.env.NODE_ENV === 'production'
-                ? ['https://gellysocial.vercel.app', '*']
-                : '*',
+            ? ['https://gellysocial.vercel.app', '*']
+            : '*',
         methods: ['GET', 'POST'],
         credentials: true,
     },
@@ -39,32 +39,41 @@ const io = new Server(server, {
 const gellybookns = io.of('/gellybook');
 
 // ═══════════════════════════════════════════════════════════════
+// ✅ Helper: وحّد المفاتيح كـ String دايماً
+// (ده أهم إصلاح — كان بيخلي السوكيت يقطع كل دقيقتين)
+// ═══════════════════════════════════════════════════════════════
+function toId(v) {
+    return v == null ? null : String(v);
+}
+
+// ═══════════════════════════════════════════════════════════════
 // State
 // ═══════════════════════════════════════════════════════════════
-const lastSeen = new Map();        // ✅ وقت آخر ظهور حقيقي (disconnect فقط)
-const onlineUsers = new Map();     // userId → Set<socketId>
-const lastActivity = new Map();    // ✅ داخلي بس (للـ timeout)
-const userTokens = new Map();
-const lastApiUpdate = new Map();
+const lastSeen = new Map();        // String userId → timestamp
+const onlineUsers = new Map();     // String userId → Set<socketId>
+const lastActivity = new Map();    // String userId → timestamp (internal)
+const userTokens = new Map();      // String userId → token
+const openChats = new Map();       // String userId → Set<chatWith>
 
-const OFFLINE_TIMEOUT = 120000;
-const ONLINE_BROADCAST_INTERVAL = 20000;
-
-let openChats = {};
+const OFFLINE_TIMEOUT = 120000;          // 2 دقايق
+const ONLINE_BROADCAST_INTERVAL = 20000; // 20 ثانية
 
 // ═══════════════════════════════════════════════════════════════
 // Helpers
 // ═══════════════════════════════════════════════════════════════
 function setOnline(userId, socketId) {
-    if (!onlineUsers.has(userId)) {
-        onlineUsers.set(userId, new Set());
+    const id = toId(userId);
+    if (!id) return;
+
+    if (!onlineUsers.has(id)) {
+        onlineUsers.set(id, new Set());
     }
-    onlineUsers.get(userId).add(socketId);
+    onlineUsers.get(id).add(socketId);
 }
 
 function broadcastOnlineUsers() {
     const onlineList = Array.from(onlineUsers.keys());
-    gellybookns.emit('friends.online.list', {users: onlineList});
+    gellybookns.emit('friends.online.list', { users: onlineList });
 }
 
 function safeEmit(room, event, payload) {
@@ -76,26 +85,33 @@ function safeEmit(room, event, payload) {
     }
 }
 
-// ✅ دالة موحّدة لتسجيل آخر ظهور
+/**
+ * ✅ تسجيل آخر ظهور للمستخدم — بيستخدم String دايماً
+ */
 function markUserOffline(userId, timestamp = Date.now()) {
-    if (!userId) return;
-    userId = String(userId);
-    lastSeen.set(userId, timestamp);
-    lastActivity.delete(userId);
-    gellybookns.emit('user.offline', { userId, lastSeen: timestamp });
-    console.log(`💤 user ${userId} → offline @ ${new Date(timestamp).toISOString()}`);
+    const id = toId(userId);
+    if (!id) return;
+
+    lastSeen.set(id, timestamp);
+    lastActivity.delete(id);
+
+    gellybookns.emit('user.offline', { userId: id, lastSeen: timestamp });
+    console.log(`💤 user ${id} → offline @ ${new Date(timestamp).toISOString()}`);
 }
 
-// ✅ قائمة الرومات اللي المستخدم لازم ينضم لها عشان يستقبل الإشعارات
+/**
+ * ✅ رومات الإشعارات اللي المستخدم لازم ينضم لها
+ */
 function getNotificationRooms(userId) {
+    const id = toId(userId);
     return [
-        'chat.' + userId,
-        'user.' + userId,
-        'newpost.' + userId,
-        'group.' + userId,
-        'page.' + userId,
-        'friendrequestsent.' + userId,
-        'friendrequestcanceled.' + userId,
+        'chat.' + id,
+        'user.' + id,
+        'newpost.' + id,
+        'group.' + id,
+        'page.' + id,
+        'friendrequestsent.' + id,
+        'friendrequestcanceled.' + id,
     ];
 }
 
@@ -112,6 +128,7 @@ app.get('/health', (req, res) => {
         online: onlineUsers.size,
         uptime: process.uptime(),
         timestamp: Date.now(),
+        memory: process.memoryUsage(),
     });
 });
 
@@ -119,33 +136,37 @@ app.get('/health', (req, res) => {
 // Webhook
 // ═══════════════════════════════════════════════════════════════
 app.post('/webhook', (req, res) => {
-    const {event, data} = req.body;
+    const { event, data } = req.body;
 
     console.log(`\n📥 [webhook] event="${event}"`);
 
     if (!event || !data) {
-        return res.status(400).json({error: 'Missing event or data'});
+        return res.status(400).json({ error: 'Missing event or data' });
     }
 
     try {
         switch (event) {
             case 'message.sent':
             case 'message.deleted':
-                safeEmit('chat.' + data.sender_id, event, data);
-                safeEmit('chat.' + data.receiver_id, event, data);
+                safeEmit('chat.' + toId(data.sender_id), event, data);
+                safeEmit('chat.' + toId(data.receiver_id), event, data);
                 break;
 
             case 'message.sent.group':
             case 'message.deleted.group':
-                safeEmit('groups.' + data.data.group_id, event, data.data);
+                safeEmit('groups.' + toId(data.data?.group_id), event, data.data);
                 break;
 
             case 'message.friendrequestsent':
-                safeEmit('friendrequestsent.' + data.receiver_id, event, data);
+                safeEmit('friendrequestsent.' + toId(data.receiver_id), event, data);
                 break;
 
             case 'message.friendrequestcanceled':
-                safeEmit('friendrequestcanceled.' + data.receiver_id, event, data);
+                safeEmit('friendrequestcanceled.' + toId(data.receiver_id), event, data);
+                // ✅ ابعت للـ sender كمان لو موجود (decline/cancel)
+                if (data.sender_id) {
+                    safeEmit('friendrequestcanceled.' + toId(data.sender_id), event, data);
+                }
                 break;
 
             case 'post.newpost':
@@ -153,23 +174,23 @@ app.post('/webhook', (req, res) => {
             case 'comment.reaction':
             case 'story.comment':
             case 'story.reaction':
-                safeEmit('newpost.' + data.receiver_id, event, data);
+                safeEmit('newpost.' + toId(data.receiver_id), event, data);
                 break;
 
             case 'follow.page':
-                safeEmit('page.' + data.receiver_id, event, data);
+                safeEmit('page.' + toId(data.receiver_id), event, data);
                 break;
 
             case 'follow.group':
-                safeEmit('group.' + data.receiver_id, event, data);
+                safeEmit('group.' + toId(data.receiver_id), event, data);
                 break;
 
             case 'message.seen':
                 if (data.sender_id) {
-                    safeEmit('chat.' + data.sender_id, event, data);
+                    safeEmit('chat.' + toId(data.sender_id), event, data);
                 }
-                if (data.viewer_id && String(data.viewer_id) !== String(data.sender_id)) {
-                    safeEmit('chat.' + data.viewer_id, event, data);
+                if (data.viewer_id && toId(data.viewer_id) !== toId(data.sender_id)) {
+                    safeEmit('chat.' + toId(data.viewer_id), event, data);
                 }
                 break;
 
@@ -177,15 +198,15 @@ app.post('/webhook', (req, res) => {
                 console.warn(`⚠️ Unknown event: ${event}`);
         }
 
-        res.status(200).json({status: 'ok', event});
+        res.status(200).json({ status: 'ok', event });
     } catch (err) {
         console.error('❌ webhook error:', err);
-        res.status(500).json({error: err.message});
+        res.status(500).json({ error: err.message });
     }
 });
 
 // ═══════════════════════════════════════════════════════════════
-// Periodic cleanup — للـ timeout بس
+// Periodic cleanup — timeout + broadcast
 // ═══════════════════════════════════════════════════════════════
 setInterval(() => {
     const now = Date.now();
@@ -195,15 +216,18 @@ setInterval(() => {
         const idle = now - lastAct;
 
         if (isOnline && idle > OFFLINE_TIMEOUT) {
+            console.log(`⏰ user ${userId} timed out after ${Math.floor(idle / 1000)}s`);
+
             const sockets = onlineUsers.get(userId);
             if (sockets) {
-                sockets.forEach(sid => {
+                sockets.forEach((sid) => {
                     const s = gellybookns.sockets.get(sid);
                     if (s) s.disconnect(true);
                 });
             }
             onlineUsers.delete(userId);
             userTokens.delete(userId);
+            openChats.delete(userId);
             markUserOffline(userId, now);
         }
     }
@@ -215,7 +239,7 @@ setInterval(() => {
 // ═══════════════════════════════════════════════════════════════
 gellybookns.on('connection', (socket) => {
     const token = socket.handshake.auth?.token;
-    const userId = socket.handshake.auth?.userId;
+    const userId = toId(socket.handshake.auth?.userId); // ✅ String
 
     socket.userId = userId;
     socket.realUserId = userId;
@@ -223,145 +247,214 @@ gellybookns.on('connection', (socket) => {
 
     console.log(`\n🔌 Connected: user=${userId} socket=${socket.id}`);
 
-    // ✅ امسح lastSeen بس لو ده أول socket للمستخدم
-    if (userId && !onlineUsers.has(String(userId))) {
-        lastSeen.delete(String(userId));
-    }
-
-    if (userId && token) {
-        userTokens.set(userId, token);
-        if (!lastActivity.has(userId))
-            lastActivity.set(userId, Date.now());
-    }
-
-    // ═══════════════════════════════════════════════════════════
-    // ✅ الانضمام التلقائي — كل رومات الإشعارات
-    // ═══════════════════════════════════════════════════════════
     if (userId) {
-        getNotificationRooms(userId).forEach(room => socket.join(room));
+        // ✅ امسح lastSeen بس لو ده أول socket للمستخدم
+        if (!onlineUsers.has(userId)) {
+            lastSeen.delete(userId);
+        }
 
-        setOnline(String(userId), socket.id);
-        gellybookns.emit('user.online', {userId});
+        if (token) {
+            userTokens.set(userId, token);
+        }
+
+        // ✅ سجل النشاط دلوقتي
+        lastActivity.set(userId, Date.now());
+
+        // ✅ الانضمام لكل الرومات
+        getNotificationRooms(userId).forEach((room) => socket.join(room));
+
+        setOnline(userId, socket.id);
+        gellybookns.emit('user.online', { userId });
         broadcastOnlineUsers();
 
         console.log(`📥 user ${userId} joined rooms:`, getNotificationRooms(userId).join(', '));
     }
 
     // ═══════════════════════════════════════════════════════════
-    // WebRTC
+    // WebRTC — المكالمات
     // ═══════════════════════════════════════════════════════════
-    socket.on('call.offer', ({ to, offer, type, callerName }) => {
-        safeEmit('chat.' + to, 'call.offer', {
+
+    /**
+     * ✅ offer — يدعم ICE restart عبر flag isRestart
+     */
+    socket.on('call.offer', ({ to, offer, type, callerName, isRestart }) => {
+        const toId_ = toId(to);
+        if (!toId_) return;
+
+        safeEmit('chat.' + toId_, 'call.offer', {
             from: socket.realUserId,
-            offer, type,
+            offer,
+            type,
             callerName: callerName || 'مستخدم',
+            isRestart: !!isRestart,   // ✅ مرّر الـ flag
         });
     });
 
+    /**
+     * ✅ answer — بعد استقبال الـ SDP، بلّغ الطرف التاني بـ call.answered
+     *    (كان الكود القديم بيعتمد على call.accept اللي محدش بيبعته)
+     */
     socket.on('call.answer', ({ to, answer }) => {
-        safeEmit('chat.' + to, 'call.answer', {
+        const toId_ = toId(to);
+        if (!toId_) return;
+
+        // مرّر الـ SDP للـ caller
+        safeEmit('chat.' + toId_, 'call.answer', {
             from: socket.realUserId,
             answer,
+        });
+
+        // ✅ بلّغ الـ caller إن المكالمة اتقبلت (يبدأ الـ timer)
+        safeEmit('chat.' + toId_, 'call.answered', {
+            from: socket.realUserId,
         });
     });
 
     socket.on('call.ice', ({ to, candidate }) => {
-        safeEmit('chat.' + to, 'call.ice', {
+        const toId_ = toId(to);
+        if (!toId_) return;
+
+        safeEmit('chat.' + toId_, 'call.ice', {
             from: socket.realUserId,
             candidate,
         });
     });
 
+    // (احتياطي — لو الفرونت بعت call.accept)
     socket.on('call.accept', ({ toUserId }) => {
-        safeEmit('chat.' + toUserId, 'call.answered', {});
+        const toId_ = toId(toUserId);
+        if (!toId_) return;
+
+        safeEmit('chat.' + toId_, 'call.answered', {
+            from: socket.realUserId,
+        });
     });
 
     socket.on('call.reject', ({ toUserId }) => {
-        safeEmit('chat.' + toUserId, 'call.rejected', {});
+        const toId_ = toId(toUserId);
+        if (!toId_) return;
+
+        safeEmit('chat.' + toId_, 'call.rejected', {
+            from: socket.realUserId,
+        });
     });
 
     socket.on('call-ended', ({ to, from, duration }) => {
-        safeEmit('chat.' + to, 'call-ended', {from, duration});
+        const toId_ = toId(to);
+        if (!toId_) return;
+
+        safeEmit('chat.' + toId_, 'call-ended', {
+            from: from ?? socket.realUserId,
+            duration: duration || 0,
+        });
     });
 
     socket.on('call_missed', ({ to, from, chatId }) => {
-        safeEmit('chat.' + to, 'call_missed', {from, chatId});
+        const toId_ = toId(to);
+        if (!toId_) return;
+
+        safeEmit('chat.' + toId_, 'call_missed', {
+            from: from ?? socket.realUserId,
+            chatId: chatId || socket.realUserId,
+        });
     });
 
     // ═══════════════════════════════════════════════════════════
-    // join
+    // Join rooms
     // ═══════════════════════════════════════════════════════════
     socket.on('join', (room) => {
         if (typeof room !== 'string' || !room) return;
         socket.join(room);
         if (socket.realUserId) {
-            lastActivity.set(String(socket.realUserId), Date.now());
+            lastActivity.set(socket.realUserId, Date.now());
         }
     });
 
     socket.on('join-profile', (uid) => {
-        socket.join(`profile.${uid}`);
+        const id = toId(uid);
+        if (id) socket.join('profile.' + id);
     });
 
-    // ═══ Heartbeat ═══
+    // ═══════════════════════════════════════════════════════════
+    // Heartbeat
+    // ═══════════════════════════════════════════════════════════
     socket.on('heartbeat', () => {
         const uid = socket.realUserId;
         if (!uid) return;
 
-        lastActivity.set(String(uid), Date.now());
+        lastActivity.set(uid, Date.now());
 
-        if (onlineUsers.has(String(uid))) {
-            onlineUsers.get(String(uid)).add(socket.id);
-        } else {
-            onlineUsers.set(String(uid), new Set([socket.id]));
-            gellybookns.emit('user.online', {userId: uid});
+        if (!onlineUsers.has(uid)) {
+            onlineUsers.set(uid, new Set([socket.id]));
+            gellybookns.emit('user.online', { userId: uid });
             broadcastOnlineUsers();
+        } else {
+            onlineUsers.get(uid).add(socket.id);
         }
     });
 
-    // ═══ Typing ═══
+    socket.on('ping', () => {
+        const uid = socket.realUserId;
+        if (uid) lastActivity.set(uid, Date.now());
+        socket.emit('pong');
+    });
+
+    // ═══════════════════════════════════════════════════════════
+    // Typing
+    // ═══════════════════════════════════════════════════════════
     socket.on('useristyping', ({ sender, receiver }) => {
         if (socket.realUserId) {
-            lastActivity.set(String(socket.realUserId), Date.now());
+            lastActivity.set(socket.realUserId, Date.now());
         }
-        safeEmit('chat.' + sender, 'useristyping', {sender, receiver});
-        safeEmit('chat.' + receiver, 'useristyping', {sender, receiver});
+        const senderId = toId(sender);
+        const receiverId = toId(receiver);
+
+        if (senderId) safeEmit('chat.' + senderId, 'useristyping', { sender, receiver });
+        if (receiverId) safeEmit('chat.' + receiverId, 'useristyping', { sender, receiver });
     });
 
     // ═══════════════════════════════════════════════════════════
-    // ✅ get-last-seen
+    // get-last-seen
     // ═══════════════════════════════════════════════════════════
     socket.on('get-last-seen', (uid, callback) => {
-        const id = String(uid);
+        const id = toId(uid);
+        if (!id || typeof callback !== 'function') return;
 
         if (onlineUsers.has(id)) {
             return callback({ lastSeen: 'online' });
         }
 
-        const last = lastSeen.get(id);
-        return callback({
-            lastSeen: last || null,
-        });
+        return callback({ lastSeen: lastSeen.get(id) || null });
     });
 
-    // ═══ Chat opened/closed ═══
+    // ═══════════════════════════════════════════════════════════
+    // Chat opened/closed
+    // ═══════════════════════════════════════════════════════════
     socket.on('chat.opened', ({ chatWith }) => {
         const uid = socket.realUserId;
-        if (!uid) return;
-        if (!openChats[uid]) openChats[uid] = [];
-        if (!openChats[uid].includes(chatWith)) {
-            openChats[uid].push(chatWith);
+        const cw = toId(chatWith);
+        if (!uid || !cw) return;
+
+        if (!openChats.has(uid)) {
+            openChats.set(uid, new Set());
         }
+        openChats.get(uid).add(cw);
     });
 
     socket.on('chat.closed', ({ chatWith }) => {
         const uid = socket.realUserId;
-        if (!uid || !openChats[uid]) return;
-        openChats[uid] = openChats[uid].filter((id) => id !== chatWith);
+        const cw = toId(chatWith);
+        if (!uid || !cw) return;
+
+        const set = openChats.get(uid);
+        if (set) {
+            set.delete(cw);
+            if (set.size === 0) openChats.delete(uid);
+        }
     });
 
     // ═══════════════════════════════════════════════════════════
-    // ✅ user.offline
+    // user.offline (manual)
     // ═══════════════════════════════════════════════════════════
     socket.on('user.offline', () => {
         const uid = socket.realUserId;
@@ -369,21 +462,23 @@ gellybookns.on('connection', (socket) => {
 
         userTokens.delete(uid);
 
-        const sockets = onlineUsers.get(String(uid));
+        const sockets = onlineUsers.get(uid);
         if (!sockets || sockets.size <= 1) {
             markUserOffline(uid, Date.now());
         } else {
-            lastActivity.delete(String(uid));
+            lastActivity.delete(uid);
         }
     });
 
-    // ═══ Logout ═══
+    // ═══════════════════════════════════════════════════════════
+    // Logout
+    // ═══════════════════════════════════════════════════════════
     socket.on('member.logout', () => {
         const uid = socket.realUserId;
         if (!uid) return;
 
         const logoutTime = Date.now();
-        const sockets = onlineUsers.get(String(uid));
+        const sockets = onlineUsers.get(uid);
 
         if (sockets) {
             sockets.forEach((sid) => {
@@ -392,14 +487,16 @@ gellybookns.on('connection', (socket) => {
             });
         }
 
-        onlineUsers.delete(String(uid));
+        onlineUsers.delete(uid);
+        userTokens.delete(uid);
+        openChats.delete(uid);
         markUserOffline(uid, logoutTime);
 
         console.log(`🚪 user ${uid} logged out`);
     });
 
     // ═══════════════════════════════════════════════════════════
-    // ✅ disconnect
+    // Disconnect
     // ═══════════════════════════════════════════════════════════
     socket.on('disconnect', (reason) => {
         const uid = socket.realUserId;
@@ -407,20 +504,18 @@ gellybookns.on('connection', (socket) => {
 
         if (!uid) return;
 
-        const sockets = onlineUsers.get(String(uid));
+        const sockets = onlineUsers.get(uid);
 
         if (sockets) {
             sockets.delete(socket.id);
 
             if (sockets.size === 0) {
-                onlineUsers.delete(String(uid));
+                onlineUsers.delete(uid);
+                lastActivity.delete(uid);
+                openChats.delete(uid);       // ✅ امسح الـ memory leak
                 markUserOffline(uid, Date.now());
             } else {
                 console.log(`ℹ️ user ${uid} still has ${sockets.size} socket(s) → still online`);
-            }
-        } else {
-            if (!onlineUsers.has(String(uid))) {
-                markUserOffline(uid, Date.now());
             }
         }
 
@@ -437,6 +532,9 @@ server.listen(port, () => {
     console.log(`   Webhook: POST http://localhost:${port}/webhook\n`);
 });
 
+// ═══════════════════════════════════════════════════════════════
+// Graceful shutdown
+// ═══════════════════════════════════════════════════════════════
 process.on('SIGTERM', () => {
     console.log('🛑 SIGTERM received, closing...');
     io.close(() => {
@@ -444,10 +542,22 @@ process.on('SIGTERM', () => {
     });
 });
 
+process.on('SIGINT', () => {
+    console.log('🛑 SIGINT received, closing...');
+    io.close(() => {
+        server.close(() => process.exit(0));
+    });
+});
+
 process.on('uncaughtException', (err) => {
     console.error('❌ uncaughtException:', err);
+    // ✅ اخرج — PM2/systemd هيعيد التشغيل
+    // حالة العملية مش مضمونة بعد uncaughtException
+    setTimeout(() => process.exit(1), 1000);
 });
 
 process.on('unhandledRejection', (reason) => {
     console.error('❌ unhandledRejection:', reason);
+    // ✅ سجل بس — متخرجش هنا عشان متقتلش السيرفر من promise بسيط
+    // (لو الحاجة خطيرة، uncaughtException هتلتقطها)
 });
