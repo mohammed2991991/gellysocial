@@ -1,8 +1,8 @@
 // ═══════════════════════════════════════════════════════════════
 // Gellybook Socket.IO Server
-// ✅ get-online-users — مزامنة فورية عند الاتصال
-// ✅ receiver_online في ack — كشف التسليم الفوري
-// ✅ pingTimeout قصير — كشف أسرع للـ stale sockets
+// ✅ get-online-users يرجع { users, lastSeen } — يحل مشكلة "نشط منذ"
+// ✅ receiver_online في ack
+// ✅ users.lastSeen.bulk عند الاتصال كـ fallback
 // ═══════════════════════════════════════════════════════════════
 import express from 'express';
 import { createServer } from 'http';
@@ -96,12 +96,27 @@ function getNotificationRooms(userId) {
     ];
 }
 
+// ✅ NEW: يبني array من lastSeen للـ offline users فقط
+function buildLastSeenSnapshot() {
+    const snapshot = [];
+    lastSeen.forEach((ts, userId) => {
+        if (!onlineUsers.has(userId)) {
+            snapshot.push({
+                userId: String(userId),
+                last_seen_at: ts,
+            });
+        }
+    });
+    return snapshot;
+}
+
 app.get('/', (req, res) => res.send('Socket.IO Server running on port: ' + port));
 
 app.get('/health', (req, res) => {
     res.json({
         status: 'ok',
         online: onlineUsers.size,
+        lastSeenCount: lastSeen.size,
         uptime: process.uptime(),
         timestamp: Date.now(),
         memory: process.memoryUsage(),
@@ -198,26 +213,39 @@ gellybookns.on('connection', (socket) => {
             broadcastOnlineUsers();
         }
 
-        // ✅ NEW: أرسل قائمة الأونلاين فوراً لهذا الـ socket الجديد فقط
+        // ✅ NEW: أرسل قائمة الأونلاين + lastSeen للـ socket الجديد فقط
         socket.emit('friends.online.list', {
             users: Array.from(onlineUsers.keys()),
         });
+
+        // ✅ NEW: أرسل lastSeen للـ offline users كـ bulk
+        const snapshot = buildLastSeenSnapshot();
+        if (snapshot.length) {
+            socket.emit('users.lastSeen.bulk', snapshot);
+        }
     }
 
     // ═══════════════════════════════════════════════════════════
-    // ✅ NEW: get-online-users — يرد فوراً على الـ caller
+    // ✅ FIXED: get-online-users يرجع users + lastSeen
     // ═══════════════════════════════════════════════════════════
     socket.on('get-online-users', (callback) => {
         const users = Array.from(onlineUsers.keys());
+        const lastSeenSnapshot = buildLastSeenSnapshot();
+
         if (typeof callback === 'function') {
-            callback({ users });
+            callback({ users, lastSeen: lastSeenSnapshot });
         } else {
             socket.emit('friends.online.list', { users });
+            if (lastSeenSnapshot.length) {
+                socket.emit('users.lastSeen.bulk', lastSeenSnapshot);
+            }
         }
+
+        console.log(`[get-online-users] user=${socket.realUserId} → ${users.length} online, ${lastSeenSnapshot.length} offline with lastSeen`);
     });
 
     // ═══════════════════════════════════════════════════════════
-    // ✅ FIXED: message.send — ack مع receiver_online
+    // message.send — broadcast + ack with receiver_online
     // ═══════════════════════════════════════════════════════════
     socket.on('message.send', ({ to, message, sender } = {}, ack) => {
         const toId_ = toId(to);
@@ -227,7 +255,6 @@ gellybookns.on('connection', (socket) => {
             return;
         }
 
-        // ✅ هل المستقبِل عنده socket نشط؟
         const receiverRoom = gellybookns.adapter.rooms.get('chat.' + toId_);
         const receiverOnline = !!(receiverRoom && receiverRoom.size > 0);
 
@@ -238,15 +265,11 @@ gellybookns.on('connection', (socket) => {
             sender: sender || { name: 'مستخدم', avatar: null }
         };
 
-        // 1️⃣ المستقبِل
         safeEmit('chat.' + toId_, 'message.sent', payload);
-
-        // 2️⃣ المرسل (تابات تانية)
         gellybookns.to('chat.' + socket.realUserId)
             .except(socket.id)
             .emit('message.sent', payload);
 
-        // 3️⃣ ✅ ack مع receiver_online
         if (typeof ack === 'function') {
             ack({
                 ok: true,
@@ -444,8 +467,8 @@ gellybookns.on('connection', (socket) => {
 server.listen(port, () => {
     console.log(`\n✅ Socket.IO running on port: ${port}`);
     console.log(`   Path: /gellybook/`);
-    console.log(`   get-online-users: ✅ implemented`);
-    console.log(`   receiver_online in ack: ✅ implemented\n`);
+    console.log(`   get-online-users: returns users + lastSeen ✅`);
+    console.log(`   receiver_online in ack: ✅\n`);
 });
 
 process.on('SIGTERM', () => {
