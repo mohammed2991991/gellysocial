@@ -1,8 +1,8 @@
 // ═══════════════════════════════════════════════════════════════
 // Gellybook Socket.IO Server
-// ✅ Online/Offline يعتمد على disconnect فقط (بدون idle kick)
-// ✅ Heartbeat مع ack — يكشف الـ stale sockets فوراً
-// ✅ pingTimeout أقصر — كشف أسرع
+// ✅ get-online-users — مزامنة فورية عند الاتصال
+// ✅ receiver_online في ack — كشف التسليم الفوري
+// ✅ pingTimeout قصير — كشف أسرع للـ stale sockets
 // ═══════════════════════════════════════════════════════════════
 import express from 'express';
 import { createServer } from 'http';
@@ -33,9 +33,8 @@ const io = new Server(server, {
         credentials: true,
     },
     path: '/gellybook/',
-    // ✅ كشف أسرع للـ stale sockets
-    pingInterval: 20000,   // 20s (كان 25)
-    pingTimeout: 25000,    // 25s (كان 60) — stale detection خلال 45s كحد أقصى
+    pingInterval: 20000,
+    pingTimeout: 25000,
     transports: ['websocket', 'polling'],
 });
 
@@ -45,28 +44,21 @@ function toId(v) {
     return v == null ? null : String(v);
 }
 
-// ═══════════════════════════════════════════════════════════════
-// State
-// ═══════════════════════════════════════════════════════════════
 const lastSeen = new Map();
-const onlineUsers = new Map();       // userId → Set<socketId>
+const onlineUsers = new Map();
 const lastActivity = new Map();
 const userTokens = new Map();
 const openChats = new Map();
 
-const ONLINE_BROADCAST_INTERVAL = 30000;  // 30s (كان 60)
+const ONLINE_BROADCAST_INTERVAL = 30000;
 
-// ═══════════════════════════════════════════════════════════════
-// Helpers
-// ═══════════════════════════════════════════════════════════════
 function setOnline(userId, socketId) {
     const id = toId(userId);
     if (!id) return false;
-
     const wasOffline = !onlineUsers.has(id);
     if (!onlineUsers.has(id)) onlineUsers.set(id, new Set());
     onlineUsers.get(id).add(socketId);
-    return wasOffline;  // true لو كان offline ورجع online
+    return wasOffline;
 }
 
 function broadcastOnlineUsers() {
@@ -88,7 +80,7 @@ function markUserOffline(userId, timestamp = Date.now()) {
     lastSeen.set(id, timestamp);
     lastActivity.delete(id);
     gellybookns.emit('user.offline', { userId: id, lastSeen: timestamp });
-    console.log(`💤 user ${id} → offline @ ${new Date(timestamp).toISOString()}`);
+    console.log(`💤 user ${id} → offline`);
 }
 
 function getNotificationRooms(userId) {
@@ -104,9 +96,6 @@ function getNotificationRooms(userId) {
     ];
 }
 
-// ═══════════════════════════════════════════════════════════════
-// Health
-// ═══════════════════════════════════════════════════════════════
 app.get('/', (req, res) => res.send('Socket.IO Server running on port: ' + port));
 
 app.get('/health', (req, res) => {
@@ -119,9 +108,6 @@ app.get('/health', (req, res) => {
     });
 });
 
-// ═══════════════════════════════════════════════════════════════
-// Webhook
-// ═══════════════════════════════════════════════════════════════
 app.post('/webhook', (req, res) => {
     const { event, data } = req.body;
     console.log(`\n📥 [webhook] event="${event}"`);
@@ -186,16 +172,10 @@ app.post('/webhook', (req, res) => {
     }
 });
 
-// ═══════════════════════════════════════════════════════════════
-// ✅ Periodic broadcast فقط — بدون idle kick
-// ═══════════════════════════════════════════════════════════════
 setInterval(() => {
     broadcastOnlineUsers();
 }, ONLINE_BROADCAST_INTERVAL);
 
-// ═══════════════════════════════════════════════════════════════
-// SOCKET CONNECTION
-// ═══════════════════════════════════════════════════════════════
 gellybookns.on('connection', (socket) => {
     const token = socket.handshake.auth?.token;
     const userId = toId(socket.handshake.auth?.userId);
@@ -218,11 +198,26 @@ gellybookns.on('connection', (socket) => {
             broadcastOnlineUsers();
         }
 
-        console.log(`📥 user ${userId} joined:`, getNotificationRooms(userId).join(', '));
+        // ✅ NEW: أرسل قائمة الأونلاين فوراً لهذا الـ socket الجديد فقط
+        socket.emit('friends.online.list', {
+            users: Array.from(onlineUsers.keys()),
+        });
     }
 
     // ═══════════════════════════════════════════════════════════
-    // message.send — broadcast فوري + ack للمُرسل
+    // ✅ NEW: get-online-users — يرد فوراً على الـ caller
+    // ═══════════════════════════════════════════════════════════
+    socket.on('get-online-users', (callback) => {
+        const users = Array.from(onlineUsers.keys());
+        if (typeof callback === 'function') {
+            callback({ users });
+        } else {
+            socket.emit('friends.online.list', { users });
+        }
+    });
+
+    // ═══════════════════════════════════════════════════════════
+    // ✅ FIXED: message.send — ack مع receiver_online
     // ═══════════════════════════════════════════════════════════
     socket.on('message.send', ({ to, message, sender } = {}, ack) => {
         const toId_ = toId(to);
@@ -231,6 +226,10 @@ gellybookns.on('connection', (socket) => {
             if (typeof ack === 'function') ack({ ok: false, error: 'missing_params' });
             return;
         }
+
+        // ✅ هل المستقبِل عنده socket نشط؟
+        const receiverRoom = gellybookns.adapter.rooms.get('chat.' + toId_);
+        const receiverOnline = !!(receiverRoom && receiverRoom.size > 0);
 
         const payload = {
             sender_id: socket.realUserId,
@@ -247,12 +246,17 @@ gellybookns.on('connection', (socket) => {
             .except(socket.id)
             .emit('message.sent', payload);
 
-        // ✅ ack فوري (لو العميل طلبه)
+        // 3️⃣ ✅ ack مع receiver_online
         if (typeof ack === 'function') {
-            ack({ ok: true, client_id: message.client_id, id: message.id });
+            ack({
+                ok: true,
+                client_id: message.client_id,
+                id: message.id,
+                receiver_online: receiverOnline,
+            });
         }
 
-        console.log(`📨 message.send ${socket.realUserId} → ${toId_} (client_id=${message.client_id || '-'})`);
+        console.log(`📨 message.send ${socket.realUserId} → ${toId_} (online=${receiverOnline})`);
     });
 
     // ═══════════════════════════════════════════════════════════
@@ -312,9 +316,6 @@ gellybookns.on('connection', (socket) => {
         });
     });
 
-    // ═══════════════════════════════════════════════════════════
-    // Join rooms
-    // ═══════════════════════════════════════════════════════════
     socket.on('join', (room) => {
         if (typeof room !== 'string' || !room) return;
         socket.join(room);
@@ -326,26 +327,17 @@ gellybookns.on('connection', (socket) => {
         if (id) socket.join('profile.' + id);
     });
 
-    // ═══════════════════════════════════════════════════════════
-    // ✅ Heartbeat — مع ack فوري (يكشف الـ stale sockets)
-    // ═══════════════════════════════════════════════════════════
     socket.on('heartbeat', (callback) => {
         const uid = socket.realUserId;
-
-        // ✅ رد فوري على الـ ack (لو موجود)
         if (typeof callback === 'function') {
             callback({ ok: true, serverTime: Date.now() });
         }
-
         if (!uid) return;
-
         lastActivity.set(uid, Date.now());
-
         if (!onlineUsers.has(uid)) {
             onlineUsers.set(uid, new Set([socket.id]));
             gellybookns.emit('user.online', { userId: uid });
             broadcastOnlineUsers();
-            console.log(`💚 user ${uid} back online via heartbeat`);
         } else {
             onlineUsers.get(uid).add(socket.id);
         }
@@ -361,9 +353,6 @@ gellybookns.on('connection', (socket) => {
         }
     });
 
-    // ═══════════════════════════════════════════════════════════
-    // Typing
-    // ═══════════════════════════════════════════════════════════
     socket.on('useristyping', ({ sender, receiver }) => {
         if (socket.realUserId) lastActivity.set(socket.realUserId, Date.now());
         const senderId = toId(sender);
@@ -372,9 +361,6 @@ gellybookns.on('connection', (socket) => {
         if (receiverId) safeEmit('chat.' + receiverId, 'useristyping', { sender, receiver });
     });
 
-    // ═══════════════════════════════════════════════════════════
-    // get-last-seen
-    // ═══════════════════════════════════════════════════════════
     socket.on('get-last-seen', (uid, callback) => {
         const id = toId(uid);
         if (!id || typeof callback !== 'function') return;
@@ -382,9 +368,6 @@ gellybookns.on('connection', (socket) => {
         return callback({ lastSeen: lastSeen.get(id) || null });
     });
 
-    // ═══════════════════════════════════════════════════════════
-    // Chat opened/closed
-    // ═══════════════════════════════════════════════════════════
     socket.on('chat.opened', ({ chatWith }) => {
         const uid = socket.realUserId;
         const cw = toId(chatWith);
@@ -404,16 +387,10 @@ gellybookns.on('connection', (socket) => {
         }
     });
 
-    // ═══════════════════════════════════════════════════════════
-    // session.refresh — backward compat (لا شيء)
-    // ═══════════════════════════════════════════════════════════
     socket.on('session.refresh', (callback) => {
         if (typeof callback === 'function') callback({ ok: true });
     });
 
-    // ═══════════════════════════════════════════════════════════
-    // Manual offline
-    // ═══════════════════════════════════════════════════════════
     socket.on('user.offline', () => {
         const uid = socket.realUserId;
         if (!uid) return;
@@ -426,9 +403,6 @@ gellybookns.on('connection', (socket) => {
         }
     });
 
-    // ═══════════════════════════════════════════════════════════
-    // Logout
-    // ═══════════════════════════════════════════════════════════
     socket.on('member.logout', () => {
         const uid = socket.realUserId;
         if (!uid) return;
@@ -444,12 +418,8 @@ gellybookns.on('connection', (socket) => {
         userTokens.delete(uid);
         openChats.delete(uid);
         markUserOffline(uid, logoutTime);
-        console.log(`🚪 user ${uid} logged out`);
     });
 
-    // ═══════════════════════════════════════════════════════════
-    // Disconnect — source of truth for online/offline
-    // ═══════════════════════════════════════════════════════════
     socket.on('disconnect', (reason) => {
         const uid = socket.realUserId;
         console.log(`🔌 Disconnected: user=${uid} socket=${socket.id} (${reason})`);
@@ -466,33 +436,23 @@ gellybookns.on('connection', (socket) => {
                 openChats.delete(uid);
                 markUserOffline(uid, Date.now());
                 broadcastOnlineUsers();
-            } else {
-                console.log(`ℹ️ user ${uid} still has ${sockets.size} socket(s)`);
             }
         }
     });
 });
 
-// ═══════════════════════════════════════════════════════════════
-// Start
-// ═══════════════════════════════════════════════════════════════
 server.listen(port, () => {
     console.log(`\n✅ Socket.IO running on port: ${port}`);
     console.log(`   Path: /gellybook/`);
-    console.log(`   pingTimeout: 25s (fast stale detection)`);
-    console.log(`   Online/offline: based on disconnect only\n`);
+    console.log(`   get-online-users: ✅ implemented`);
+    console.log(`   receiver_online in ack: ✅ implemented\n`);
 });
 
-// ═══════════════════════════════════════════════════════════════
-// Graceful shutdown
-// ═══════════════════════════════════════════════════════════════
 process.on('SIGTERM', () => {
-    console.log('🛑 SIGTERM received');
     io.close(() => { server.close(() => process.exit(0)); });
 });
 
 process.on('SIGINT', () => {
-    console.log('🛑 SIGINT received');
     io.close(() => { server.close(() => process.exit(0)); });
 });
 
