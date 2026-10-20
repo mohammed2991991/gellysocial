@@ -1,6 +1,7 @@
 // ═══════════════════════════════════════════════════════════════
 // Gellybook Socket.IO Server — نسخة كاملة بعد إصلاح آخر ظهور + rooms
 // + إصلاح باج number/string + ICE restart + memory leaks
+// + إصلاح انقطاع المستخدمين (بدل disconnect → session.refresh)
 // ═══════════════════════════════════════════════════════════════
 import express from 'express';
 import { createServer } from 'http';
@@ -40,7 +41,6 @@ const gellybookns = io.of('/gellybook');
 
 // ═══════════════════════════════════════════════════════════════
 // ✅ Helper: وحّد المفاتيح كـ String دايماً
-// (ده أهم إصلاح — كان بيخلي السوكيت يقطع كل دقيقتين)
 // ═══════════════════════════════════════════════════════════════
 function toId(v) {
     return v == null ? null : String(v);
@@ -49,14 +49,16 @@ function toId(v) {
 // ═══════════════════════════════════════════════════════════════
 // State
 // ═══════════════════════════════════════════════════════════════
-const lastSeen = new Map();        // String userId → timestamp
-const onlineUsers = new Map();     // String userId → Set<socketId>
-const lastActivity = new Map();    // String userId → timestamp (internal)
-const userTokens = new Map();      // String userId → token
-const openChats = new Map();       // String userId → Set<chatWith>
+const lastSeen = new Map();
+const onlineUsers = new Map();
+const lastActivity = new Map();
+const userTokens = new Map();
+const openChats = new Map();
 
-const OFFLINE_TIMEOUT = 120000;          // 2 دقايق
-const ONLINE_BROADCAST_INTERVAL = 20000; // 20 ثانية
+// ✅ زيادة الـ timeout — بدل 2 دقيقة بقى 10 دقايق
+//    لما يوصل، بنعمل session.refresh بدل disconnect
+const OFFLINE_TIMEOUT = 600000;          // 10 دقايق
+const ONLINE_BROADCAST_INTERVAL = 60000; // 60 ثانية
 
 // ═══════════════════════════════════════════════════════════════
 // Helpers
@@ -85,9 +87,6 @@ function safeEmit(room, event, payload) {
     }
 }
 
-/**
- * ✅ تسجيل آخر ظهور للمستخدم — بيستخدم String دايماً
- */
 function markUserOffline(userId, timestamp = Date.now()) {
     const id = toId(userId);
     if (!id) return;
@@ -99,9 +98,6 @@ function markUserOffline(userId, timestamp = Date.now()) {
     console.log(`💤 user ${id} → offline @ ${new Date(timestamp).toISOString()}`);
 }
 
-/**
- * ✅ رومات الإشعارات اللي المستخدم لازم ينضم لها
- */
 function getNotificationRooms(userId) {
     const id = toId(userId);
     return [
@@ -163,7 +159,6 @@ app.post('/webhook', (req, res) => {
 
             case 'message.friendrequestcanceled':
                 safeEmit('friendrequestcanceled.' + toId(data.receiver_id), event, data);
-                // ✅ ابعت للـ sender كمان لو موجود (decline/cancel)
                 if (data.sender_id) {
                     safeEmit('friendrequestcanceled.' + toId(data.sender_id), event, data);
                 }
@@ -206,7 +201,7 @@ app.post('/webhook', (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
-// Periodic cleanup — timeout + broadcast
+// Periodic cleanup — ✅ session.refresh بدل disconnect
 // ═══════════════════════════════════════════════════════════════
 setInterval(() => {
     const now = Date.now();
@@ -216,21 +211,29 @@ setInterval(() => {
         const idle = now - lastAct;
 
         if (isOnline && idle > OFFLINE_TIMEOUT) {
-            console.log(`⏰ user ${userId} timed out after ${Math.floor(idle / 1000)}s`);
+            console.log(`⏰ user ${userId} idle for ${Math.floor(idle / 1000)}s → soft offline (session.refresh)`);
 
             const sockets = onlineUsers.get(userId);
+
+            // ✅ بدل ما نقطع الـ socket (io server disconnect = ما يعيدش الاتصال)،
+            //    نبلّغه يعمل refresh — العميل عنده heartbeat + reconnect منطق
             if (sockets) {
                 sockets.forEach((sid) => {
                     const s = gellybookns.sockets.get(sid);
-                    if (s) s.disconnect(true);
+                    if (!s) return;
+                    try { s.emit('session.refresh'); } catch (e) {}
                 });
             }
+
+            // امسح من onlineUsers (يبان offline للباقي)
+            // لو العميل رد بـ heartbeat، هيترجع فوراً
             onlineUsers.delete(userId);
             userTokens.delete(userId);
             openChats.delete(userId);
             markUserOffline(userId, now);
         }
     }
+
     broadcastOnlineUsers();
 }, ONLINE_BROADCAST_INTERVAL);
 
@@ -239,7 +242,7 @@ setInterval(() => {
 // ═══════════════════════════════════════════════════════════════
 gellybookns.on('connection', (socket) => {
     const token = socket.handshake.auth?.token;
-    const userId = toId(socket.handshake.auth?.userId); // ✅ String
+    const userId = toId(socket.handshake.auth?.userId);
 
     socket.userId = userId;
     socket.realUserId = userId;
@@ -248,7 +251,6 @@ gellybookns.on('connection', (socket) => {
     console.log(`\n🔌 Connected: user=${userId} socket=${socket.id}`);
 
     if (userId) {
-        // ✅ امسح lastSeen بس لو ده أول socket للمستخدم
         if (!onlineUsers.has(userId)) {
             lastSeen.delete(userId);
         }
@@ -257,10 +259,8 @@ gellybookns.on('connection', (socket) => {
             userTokens.set(userId, token);
         }
 
-        // ✅ سجل النشاط دلوقتي
         lastActivity.set(userId, Date.now());
 
-        // ✅ الانضمام لكل الرومات
         getNotificationRooms(userId).forEach((room) => socket.join(room));
 
         setOnline(userId, socket.id);
@@ -273,10 +273,6 @@ gellybookns.on('connection', (socket) => {
     // ═══════════════════════════════════════════════════════════
     // WebRTC — المكالمات
     // ═══════════════════════════════════════════════════════════
-
-    /**
-     * ✅ offer — يدعم ICE restart عبر flag isRestart
-     */
     socket.on('call.offer', ({ to, offer, type, callerName, isRestart }) => {
         const toId_ = toId(to);
         if (!toId_) return;
@@ -286,25 +282,19 @@ gellybookns.on('connection', (socket) => {
             offer,
             type,
             callerName: callerName || 'مستخدم',
-            isRestart: !!isRestart,   // ✅ مرّر الـ flag
+            isRestart: !!isRestart,
         });
     });
 
-    /**
-     * ✅ answer — بعد استقبال الـ SDP، بلّغ الطرف التاني بـ call.answered
-     *    (كان الكود القديم بيعتمد على call.accept اللي محدش بيبعته)
-     */
     socket.on('call.answer', ({ to, answer }) => {
         const toId_ = toId(to);
         if (!toId_) return;
 
-        // مرّر الـ SDP للـ caller
         safeEmit('chat.' + toId_, 'call.answer', {
             from: socket.realUserId,
             answer,
         });
 
-        // ✅ بلّغ الـ caller إن المكالمة اتقبلت (يبدأ الـ timer)
         safeEmit('chat.' + toId_, 'call.answered', {
             from: socket.realUserId,
         });
@@ -320,7 +310,6 @@ gellybookns.on('connection', (socket) => {
         });
     });
 
-    // (احتياطي — لو الفرونت بعت call.accept)
     socket.on('call.accept', ({ toUserId }) => {
         const toId_ = toId(toUserId);
         if (!toId_) return;
@@ -376,7 +365,7 @@ gellybookns.on('connection', (socket) => {
     });
 
     // ═══════════════════════════════════════════════════════════
-    // Heartbeat
+    // Heartbeat — ✅ بيرجع المستخدم online فوراً لو اتعمل له refresh
     // ═══════════════════════════════════════════════════════════
     socket.on('heartbeat', () => {
         const uid = socket.realUserId;
@@ -388,6 +377,7 @@ gellybookns.on('connection', (socket) => {
             onlineUsers.set(uid, new Set([socket.id]));
             gellybookns.emit('user.online', { userId: uid });
             broadcastOnlineUsers();
+            console.log(`💚 user ${uid} back online via heartbeat`);
         } else {
             onlineUsers.get(uid).add(socket.id);
         }
@@ -512,7 +502,7 @@ gellybookns.on('connection', (socket) => {
             if (sockets.size === 0) {
                 onlineUsers.delete(uid);
                 lastActivity.delete(uid);
-                openChats.delete(uid);       // ✅ امسح الـ memory leak
+                openChats.delete(uid);
                 markUserOffline(uid, Date.now());
             } else {
                 console.log(`ℹ️ user ${uid} still has ${sockets.size} socket(s) → still online`);
@@ -529,7 +519,8 @@ gellybookns.on('connection', (socket) => {
 server.listen(port, () => {
     console.log(`\n✅ Socket.IO running on port: ${port}`);
     console.log(`   Path: /gellybook/`);
-    console.log(`   Webhook: POST http://localhost:${port}/webhook\n`);
+    console.log(`   Webhook: POST http://localhost:${port}/webhook`);
+    console.log(`   Idle timeout: ${OFFLINE_TIMEOUT / 1000}s (session.refresh, not disconnect)\n`);
 });
 
 // ═══════════════════════════════════════════════════════════════
@@ -551,13 +542,9 @@ process.on('SIGINT', () => {
 
 process.on('uncaughtException', (err) => {
     console.error('❌ uncaughtException:', err);
-    // ✅ اخرج — PM2/systemd هيعيد التشغيل
-    // حالة العملية مش مضمونة بعد uncaughtException
     setTimeout(() => process.exit(1), 1000);
 });
 
 process.on('unhandledRejection', (reason) => {
     console.error('❌ unhandledRejection:', reason);
-    // ✅ سجل بس — متخرجش هنا عشان متقتلش السيرفر من promise بسيط
-    // (لو الحاجة خطيرة، uncaughtException هتلتقطها)
 });
