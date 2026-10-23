@@ -1,8 +1,9 @@
 // ═══════════════════════════════════════════════════════════════
-// Gellybook Socket.IO Server
-// ✅ get-online-users يرجع { users, lastSeen } — يحل مشكلة "نشط منذ"
-// ✅ receiver_online في ack
-// ✅ users.lastSeen.bulk عند الاتصال كـ fallback
+// Gellybook Socket.IO Server — v8
+// ✅ presence.update: invisible mode (activityStatus=false)
+// ✅ Handshake auth.invisible لحالة أولية بدون flash
+// ✅ Filter invisible users from all broadcasts
+// ✅ /debug/presence endpoint للتشخيص
 // ═══════════════════════════════════════════════════════════════
 import express from 'express';
 import { createServer } from 'http';
@@ -44,8 +45,9 @@ function toId(v) {
     return v == null ? null : String(v);
 }
 
-const lastSeen = new Map();
-const onlineUsers = new Map();
+const lastSeen = new Map();       // userId → timestamp
+const onlineUsers = new Map();    // userId → Set<socketId>
+const invisibleUsers = new Set(); // userId (activityStatus = false)
 const lastActivity = new Map();
 const userTokens = new Map();
 const openChats = new Map();
@@ -61,8 +63,10 @@ function setOnline(userId, socketId) {
     return wasOffline;
 }
 
+// ✅ الجديد: يعرض الأونلاين فقط (مش المخفيين)
 function broadcastOnlineUsers() {
-    const onlineList = Array.from(onlineUsers.keys());
+    const onlineList = Array.from(onlineUsers.keys())
+        .filter(id => !invisibleUsers.has(id));
     gellybookns.emit('friends.online.list', { users: onlineList });
 }
 
@@ -96,30 +100,53 @@ function getNotificationRooms(userId) {
     ];
 }
 
-// ✅ NEW: يبني array من lastSeen للـ offline users فقط
+// ✅ يستثني المخفيين أيضاً (خصوصية)
 function buildLastSeenSnapshot() {
     const snapshot = [];
     lastSeen.forEach((ts, userId) => {
-        if (!onlineUsers.has(userId)) {
-            snapshot.push({
-                userId: String(userId),
-                last_seen_at: ts,
-            });
-        }
+        if (onlineUsers.has(userId)) return;
+        if (invisibleUsers.has(userId)) return; // ← NEW
+        snapshot.push({
+            userId: String(userId),
+            last_seen_at: ts,
+        });
     });
     return snapshot;
 }
 
+function getVisibleOnlineList() {
+    return Array.from(onlineUsers.keys())
+        .filter(id => !invisibleUsers.has(id));
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  HTTP endpoints
+// ═══════════════════════════════════════════════════════════════
 app.get('/', (req, res) => res.send('Socket.IO Server running on port: ' + port));
 
 app.get('/health', (req, res) => {
     res.json({
         status: 'ok',
         online: onlineUsers.size,
+        visible: getVisibleOnlineList().length,
+        invisible: invisibleUsers.size,
         lastSeenCount: lastSeen.size,
         uptime: process.uptime(),
         timestamp: Date.now(),
         memory: process.memoryUsage(),
+    });
+});
+
+// ✅ debug endpoint (disable في الإنتاج)
+app.get('/debug/presence', (req, res) => {
+    if (process.env.NODE_ENV === 'production' && !process.env.ENABLE_DEBUG_ENDPOINTS) {
+        return res.status(404).json({ error: 'not found' });
+    }
+    res.json({
+        online: Array.from(onlineUsers.keys()),
+        visible: getVisibleOnlineList(),
+        invisible: Array.from(invisibleUsers),
+        lastSeen: Object.fromEntries(lastSeen),
     });
 });
 
@@ -191,34 +218,43 @@ setInterval(() => {
     broadcastOnlineUsers();
 }, ONLINE_BROADCAST_INTERVAL);
 
+// ═══════════════════════════════════════════════════════════════
+//  Socket connection
+// ═══════════════════════════════════════════════════════════════
 gellybookns.on('connection', (socket) => {
     const token = socket.handshake.auth?.token;
     const userId = toId(socket.handshake.auth?.userId);
+    const handshakeInvisible = socket.handshake.auth?.invisible === true
+                            || socket.handshake.auth?.invisible === 'true';
 
     socket.userId = userId;
     socket.realUserId = userId;
     socket.token = token;
 
-    console.log(`\n🔌 Connected: user=${userId} socket=${socket.id}`);
+    console.log(`\n🔌 Connected: user=${userId} socket=${socket.id} invisible=${handshakeInvisible}`);
 
     if (userId) {
         if (!onlineUsers.has(userId)) lastSeen.delete(userId);
         if (token) userTokens.set(userId, token);
         lastActivity.set(userId, Date.now());
+
+        // ✅ الحالة الأولية من الـ handshake (يمنع الفلاش)
+        if (handshakeInvisible) invisibleUsers.add(userId);
+
         getNotificationRooms(userId).forEach((room) => socket.join(room));
         const wasOffline = setOnline(userId, socket.id);
 
-        if (wasOffline) {
+        // ✅ لا تبث online للمخفيين
+        if (wasOffline && !invisibleUsers.has(userId)) {
             gellybookns.emit('user.online', { userId });
             broadcastOnlineUsers();
         }
 
-        // ✅ NEW: أرسل قائمة الأونلاين + lastSeen للـ socket الجديد فقط
+        // أرسل الحالة للـ socket الجديد فقط
         socket.emit('friends.online.list', {
-            users: Array.from(onlineUsers.keys()),
+            users: getVisibleOnlineList(),
         });
 
-        // ✅ NEW: أرسل lastSeen للـ offline users كـ bulk
         const snapshot = buildLastSeenSnapshot();
         if (snapshot.length) {
             socket.emit('users.lastSeen.bulk', snapshot);
@@ -226,10 +262,36 @@ gellybookns.on('connection', (socket) => {
     }
 
     // ═══════════════════════════════════════════════════════════
-    // ✅ FIXED: get-online-users يرجع users + lastSeen
+    // ✅ presence.update — جديد
+    // ═══════════════════════════════════════════════════════════
+    socket.on('presence.update', ({ online, invisible } = {}) => {
+        const uid = socket.realUserId;
+        if (!uid) return;
+
+        const wasInvisible = invisibleUsers.has(uid);
+        const shouldBeInvisible = invisible === true || online === false;
+
+        if (shouldBeInvisible && !wasInvisible) {
+            invisibleUsers.add(uid);
+            gellybookns.emit('user.offline', {
+                userId: uid,
+                lastSeen: Date.now(),
+            });
+            broadcastOnlineUsers();
+            console.log(`👻 user ${uid} → invisible`);
+        } else if (!shouldBeInvisible && wasInvisible) {
+            invisibleUsers.delete(uid);
+            gellybookns.emit('user.online', { userId: uid });
+            broadcastOnlineUsers();
+            console.log(`👁️ user ${uid} → visible`);
+        }
+    });
+
+    // ═══════════════════════════════════════════════════════════
+    // get-online-users
     // ═══════════════════════════════════════════════════════════
     socket.on('get-online-users', (callback) => {
-        const users = Array.from(onlineUsers.keys());
+        const users = getVisibleOnlineList();
         const lastSeenSnapshot = buildLastSeenSnapshot();
 
         if (typeof callback === 'function') {
@@ -241,11 +303,11 @@ gellybookns.on('connection', (socket) => {
             }
         }
 
-        console.log(`[get-online-users] user=${socket.realUserId} → ${users.length} online, ${lastSeenSnapshot.length} offline with lastSeen`);
+        console.log(`[get-online-users] user=${socket.realUserId} → ${users.length} visible, ${lastSeenSnapshot.length} offline with lastSeen`);
     });
 
     // ═══════════════════════════════════════════════════════════
-    // message.send — broadcast + ack with receiver_online
+    // message.send
     // ═══════════════════════════════════════════════════════════
     socket.on('message.send', ({ to, message, sender } = {}, ack) => {
         const toId_ = toId(to);
@@ -350,6 +412,7 @@ gellybookns.on('connection', (socket) => {
         if (id) socket.join('profile.' + id);
     });
 
+    // ✅ heartbeat: لا يعيد بث online للمخفيين
     socket.on('heartbeat', (callback) => {
         const uid = socket.realUserId;
         if (typeof callback === 'function') {
@@ -359,8 +422,10 @@ gellybookns.on('connection', (socket) => {
         lastActivity.set(uid, Date.now());
         if (!onlineUsers.has(uid)) {
             onlineUsers.set(uid, new Set([socket.id]));
-            gellybookns.emit('user.online', { userId: uid });
-            broadcastOnlineUsers();
+            if (!invisibleUsers.has(uid)) {
+                gellybookns.emit('user.online', { userId: uid });
+                broadcastOnlineUsers();
+            }
         } else {
             onlineUsers.get(uid).add(socket.id);
         }
@@ -387,6 +452,7 @@ gellybookns.on('connection', (socket) => {
     socket.on('get-last-seen', (uid, callback) => {
         const id = toId(uid);
         if (!id || typeof callback !== 'function') return;
+        if (invisibleUsers.has(id)) return callback({ lastSeen: null });
         if (onlineUsers.has(id)) return callback({ lastSeen: 'online' });
         return callback({ lastSeen: lastSeen.get(id) || null });
     });
@@ -420,6 +486,7 @@ gellybookns.on('connection', (socket) => {
         userTokens.delete(uid);
         const sockets = onlineUsers.get(uid);
         if (!sockets || sockets.size <= 1) {
+            invisibleUsers.delete(uid); // ← NEW
             markUserOffline(uid, Date.now());
         } else {
             lastActivity.delete(uid);
@@ -440,6 +507,7 @@ gellybookns.on('connection', (socket) => {
         onlineUsers.delete(uid);
         userTokens.delete(uid);
         openChats.delete(uid);
+        invisibleUsers.delete(uid); // ← NEW
         markUserOffline(uid, logoutTime);
     });
 
@@ -457,6 +525,7 @@ gellybookns.on('connection', (socket) => {
                 onlineUsers.delete(uid);
                 lastActivity.delete(uid);
                 openChats.delete(uid);
+                invisibleUsers.delete(uid); // ← NEW
                 markUserOffline(uid, Date.now());
                 broadcastOnlineUsers();
             }
@@ -467,8 +536,9 @@ gellybookns.on('connection', (socket) => {
 server.listen(port, () => {
     console.log(`\n✅ Socket.IO running on port: ${port}`);
     console.log(`   Path: /gellybook/`);
-    console.log(`   get-online-users: returns users + lastSeen ✅`);
-    console.log(`   receiver_online in ack: ✅\n`);
+    console.log(`   presence.update: ✅ (invisible mode)`);
+    console.log(`   invisibleUsers: ✅`);
+    console.log(`   /debug/presence: ✅\n`);
 });
 
 process.on('SIGTERM', () => {
