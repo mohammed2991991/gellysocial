@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════
-// Gellybook Socket.IO Server — v8 
+// Gellybook Socket.IO Server — v8
 // ✅ presence.update: invisible mode (activityStatus=false)
 // ✅ Handshake auth.invisible لحالة أولية بدون flash
 // ✅ Filter invisible users from all broadcasts
@@ -194,6 +194,9 @@ app.post('/webhook', (req, res) => {
             case 'follow.group':
                 safeEmit('group.' + toId(data.receiver_id), event, data);
                 break;
+				case 'follow.group.handled':   // ← ✅ السطر الجديد
+				    safeEmit('group.' + toId(data.receiver_id), event, data);
+				    break;
 
             case 'message.seen':
                 if (data.sender_id) {
