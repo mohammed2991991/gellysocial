@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════
-// Gellybook Socket.IO Server — v8
+// Gellybook Socket.IO Server — v8 
 // ✅ presence.update: invisible mode (activityStatus=false)
 // ✅ Handshake auth.invisible لحالة أولية بدون flash
 // ✅ Filter invisible users from all broadcasts
