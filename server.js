@@ -34,8 +34,8 @@ const io = new Server(server, {
         credentials: true,
     },
     path: '/gellybook/',
-    pingInterval: 20000,
-    pingTimeout: 25000,
+    pingInterval: 25000,
+    pingTimeout: 120000,
     transports: ['websocket', 'polling'],
 });
 
@@ -122,7 +122,7 @@ function getVisibleOnlineList() {
 // ═══════════════════════════════════════════════════════════════
 //  HTTP endpoints
 // ═══════════════════════════════════════════════════════════════
-app.get('/', (req, res) => res.send('Socket.IO Server running on port: ' + port));
+app.get('/', (req, res) => res.send('Socket.IO Server running on port tamam: ' + port));
 
 app.get('/health', (req, res) => {
     res.json({
